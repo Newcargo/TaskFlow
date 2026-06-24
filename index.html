@@ -413,7 +413,7 @@
 
 <script>
 // ── VERSION ──
-const APP_VERSION = '1.1.6';
+const APP_VERSION = '1.1.7';
 
 // ── KEYS ──
 const STORAGE_KEY='tf_data', SALT_KEY='tf_salt', AUTH_KEY='tf_auth', METHOD_KEY='tf_method', PINLEN_KEY='tf_pinlen';
@@ -589,6 +589,8 @@ async function pinPress(k,pinLen){
 function launchApp(){
   document.getElementById('app').style.display='flex';
   renderSidebar();selectView('myday');updateCounts();initSyncStatus();
+  // Auto-reconnect GD if client ID saved but token expired
+  setTimeout(()=>silentReconnectGD(),1000);
   if(window.innerWidth<=768){
     document.getElementById('menuBtn').style.display='flex';
     document.getElementById('settingsMenuBtn').style.display='flex';
@@ -923,7 +925,7 @@ function closeSettings(){
 
 function renderSettings(){
   const d=disp();
-  const gdOk=!!sessionStorage.getItem('tf_gd_token');
+  const gdOk=!!getGDToken();const gdCid=!!localStorage.getItem('tf_gd_clientid');
 
   // helper: toggle row
   const trow=(key,label,sub)=>`
@@ -958,7 +960,7 @@ function renderSettings(){
 
     <div class="settings-section">
       <div class="settings-section-title">☁️ Google Drive Backup</div>
-      ${arow('Google Drive',gdOk?'✅ Verbunden — Sync aktiv':'Nicht verbunden',gdOk?'Trennen':'Verbinden',gdOk?'disconnectGD()':'showGDGuide()')}
+      ${arow('Google Drive',gdOk?'✅ Verbunden — Sync aktiv':gdCid?'⚠️ Token abgelaufen — wird erneuert...':'Nicht verbunden',gdOk||gdCid?'Trennen':'Verbinden',gdOk||gdCid?'disconnectGD()':'showGDGuide()')}
       ${gdOk?arow('Letzter Sync',state.meta.lastSync?new Date(state.meta.lastSync).toLocaleString('de-CH'):'Noch nie','Jetzt sync','syncNow()'):''}
     </div>
 
@@ -1085,7 +1087,8 @@ function connectGD(){
 }
 
 function disconnectGD(){
-  sessionStorage.removeItem('tf_gd_token');
+  localStorage.removeItem('tf_gd_token');
+  localStorage.removeItem('tf_gd_expires');
   localStorage.removeItem('tf_gd_clientid');
   toast('Google Drive getrennt');renderSettings();initSyncStatus();
 }
@@ -1093,20 +1096,69 @@ function disconnectGD(){
 function handleGDCallback(){
   // Implicit flow returns token in URL hash
   const hash=new URLSearchParams(location.hash.replace('#',''));
-  const params=new URLSearchParams(location.search);
-  
-  // Check hash for implicit flow token
-  if(hash.get('access_token')&&(hash.get('state')==='gd_auth_implicit'||params.get('state')==='gd_auth_implicit')){
+  if(hash.get('access_token')){
     const token=hash.get('access_token');
-    sessionStorage.setItem('tf_gd_token',token);
+    const expiresIn=parseInt(hash.get('expires_in')||'3600');
+    const expiresAt=Date.now()+(expiresIn*1000)-60000; // 1 min buffer
+    // Store token + expiry persistently
+    localStorage.setItem('tf_gd_token',token);
+    localStorage.setItem('tf_gd_expires',String(expiresAt));
     history.replaceState({},'',location.pathname);
     toast('Google Drive verbunden ✓','success');
     return true;
   }
   return false;
 }
+
+function getGDToken(){
+  const token=localStorage.getItem('tf_gd_token');
+  const expires=parseInt(localStorage.getItem('tf_gd_expires')||'0');
+  if(!token||Date.now()>expires)return null;
+  return token;
+}
+
+function silentReconnectGD(){
+  // If we have a client ID but token is expired, silently refresh in background iframe
+  const clientId=localStorage.getItem('tf_gd_clientid');
+  const token=getGDToken();
+  if(!clientId||token)return; // already connected or no client ID saved
+  
+  setSyncStatus('syncing','Verbinde...');
+  const params=new URLSearchParams({
+    client_id:clientId,
+    redirect_uri:location.origin+location.pathname,
+    response_type:'token',
+    scope:'https://www.googleapis.com/auth/drive.appdata',
+    state:'gd_auth_implicit',
+    prompt:'none', // silent — no popup shown to user
+    include_granted_scopes:'true'
+  });
+  // Use hidden iframe for silent token refresh
+  const iframe=document.createElement('iframe');
+  iframe.style.display='none';
+  iframe.src='https://accounts.google.com/o/oauth2/v2/auth?'+params;
+  iframe.onload=()=>{
+    try{
+      const iHash=new URLSearchParams(iframe.contentWindow.location.hash.replace('#',''));
+      const t=iHash.get('access_token');
+      if(t){
+        const exp=parseInt(iHash.get('expires_in')||'3600');
+        localStorage.setItem('tf_gd_token',t);
+        localStorage.setItem('tf_gd_expires',String(Date.now()+(exp*1000)-60000));
+        setSyncStatus('ok','Verbunden');
+        toast('Google Drive reconnected ✓','success');
+        syncNow();
+      }
+    }catch(e){
+      // Cross-origin error = user needs to re-auth manually (expected after long time)
+      setSyncStatus('error','Bitte neu verbinden');
+    }
+    document.body.removeChild(iframe);
+  };
+  document.body.appendChild(iframe);
+}
 async function syncNow(){
-  const token=sessionStorage.getItem('tf_gd_token');if(!token){toast('Nicht verbunden','error');return;}
+  const token=getGDToken();if(!token){setSyncStatus('error','Token abgelaufen');silentReconnectGD();toast('Verbindung wird erneuert...','');return;}
   setSyncStatus('syncing','Synchronisiert...');
   try{
     const fn='taskflow-data.json';
@@ -1120,8 +1172,8 @@ async function syncNow(){
     if(document.getElementById('settingsPanel').style.display!=='none')renderSettings();
   }catch{setSyncStatus('error','Sync-Fehler');toast('Sync fehlgeschlagen','error');}
 }
-function debouncedSync(){clearTimeout(syncTimer);syncTimer=setTimeout(()=>{if(sessionStorage.getItem('tf_gd_token'))syncNow();},10000);}
-function initSyncStatus(){const t=sessionStorage.getItem('tf_gd_token');setSyncStatus(t?'ok':'error',t?'Verbunden':'Nicht verbunden');}
+function debouncedSync(){clearTimeout(syncTimer);syncTimer=setTimeout(()=>{if(getGDToken())syncNow();},10000);}
+function initSyncStatus(){const t=getGDToken();const cid=localStorage.getItem('tf_gd_clientid');if(t){setSyncStatus('ok','Verbunden');}else if(cid){setSyncStatus('syncing','Wird verbunden...');silentReconnectGD();}else{setSyncStatus('error','Nicht verbunden');}}
 function setSyncStatus(s,lbl){document.getElementById('syncDot').className='sync-dot '+s;document.getElementById('syncLabel').textContent=lbl;}
 
 // ── SIDEBAR MOBILE ──
