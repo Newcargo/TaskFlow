@@ -413,7 +413,7 @@
 
 <script>
 // ── VERSION ──
-const APP_VERSION = '1.1.5';
+const APP_VERSION = '1.1.6';
 
 // ── KEYS ──
 const STORAGE_KEY='tf_data', SALT_KEY='tf_salt', AUTH_KEY='tf_auth', METHOD_KEY='tf_method', PINLEN_KEY='tf_pinlen';
@@ -1032,7 +1032,7 @@ function importJSON(){
 }
 async function resetAll(){if(!confirm('Alle Daten unwiderruflich löschen?'))return;localStorage.clear();sessionStorage.clear();location.reload();}
 
-// ── GOOGLE DRIVE ──
+// ── GOOGLE DRIVE (GIS implicit flow — no client_secret needed) ──
 function showGDGuide(){
   showModal({title:'☁️ Google Drive verbinden',body:`
     <p style="color:var(--text-dim);font-size:13px;margin-bottom:4px">Einmalige Einrichtung — danach sync automatisch.</p>
@@ -1049,46 +1049,60 @@ function showGDGuide(){
       <div class="guide-step-desc"><strong>APIs &amp; Dienste → Bibliothek</strong> → suche <code>Google Drive API</code> → Aktivieren.</div>
     </div></div>
     <div class="guide-step"><div class="guide-step-num">4</div><div>
-      <div class="guide-step-title">OAuth-Zustimmungsbildschirm</div>
-      <div class="guide-step-desc"><strong>APIs &amp; Dienste → OAuth-Zustimmungsbildschirm</strong> → Extern → App-Name: <code>TaskFlow</code> → deine E-Mail → Speichern.</div>
+      <div class="guide-step-title">OAuth Consent Screen</div>
+      <div class="guide-step-desc"><strong>Google Auth Platform → Branding</strong> → App-Name: <code>TaskFlow</code> → deine E-Mail → Speichern.<br>
+      Dann <strong>Audience → External → Add users</strong> → deine Gmail-Adresse eintragen.</div>
     </div></div>
     <div class="guide-step"><div class="guide-step-num">5</div><div>
       <div class="guide-step-title">OAuth-Client-ID erstellen</div>
-      <div class="guide-step-desc"><strong>Anmeldedaten → + Erstellen → OAuth-Client-ID</strong> → Typ: <strong>Webanwendung</strong><br>
-      Autorisierte JS-Quellen: <code>${location.origin}</code><br>
-      Weiterleitungs-URI: <code>${location.origin}${location.pathname}</code><br>
-      → Erstellen.</div>
+      <div class="guide-step-desc"><strong>Clients → + Create Client</strong> → Typ: <strong>Web application</strong><br>
+      Authorized JavaScript origins: <code>${location.origin}</code><br>
+      Authorized redirect URIs: <code>${location.origin}${location.pathname}</code><br>
+      → Create.</div>
     </div></div>
     <div class="guide-step"><div class="guide-step-num">6</div><div>
       <div class="guide-step-title">Client-ID kopieren &amp; einfügen</div>
-      <div class="guide-step-desc">Im Dialog siehst du deine Client-ID (endet auf <code>.apps.googleusercontent.com</code>). Klicke unten auf <strong>Verbinden</strong> und füge sie ein.</div>
+      <div class="guide-step-desc">Kopiere die Client-ID (endet auf <code>.apps.googleusercontent.com</code>) und klicke unten auf <strong>Verbinden</strong>.</div>
     </div></div>
-    <div class="guide-note">💡 Daten landen im privaten App-Datenordner von Google Drive — unsichtbar in "Meine Ablage".</div>`,
+    <div class="guide-note">💡 Kein Passwort oder Client-Secret nötig. Der Token wird nur für diese Browser-Session gespeichert.</div>`,
     confirm:'Verbinden →',onConfirm:async()=>{connectGD();return true;}});
 }
+
 function connectGD(){
-  const clientId=prompt('Google OAuth Client-ID einfügen:');
+  const clientId=prompt('Google OAuth Client-ID einfügen\n(endet auf .apps.googleusercontent.com):');
   if(!clientId?.includes('.apps.googleusercontent.com')){toast('Ungültige Client-ID','error');return;}
   localStorage.setItem('tf_gd_clientid',clientId);
-  const verifier=Array.from(crypto.getRandomValues(new Uint8Array(32))).map(b=>b.toString(16).padStart(2,'0')).join('');
-  sessionStorage.setItem('tf_gd_verifier',verifier);
-  crypto.subtle.digest('SHA-256',new TextEncoder().encode(verifier)).then(h=>{
-    const ch=btoa(String.fromCharCode(...new Uint8Array(h))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'');
-    location.href='https://accounts.google.com/o/oauth2/v2/auth?'+new URLSearchParams({client_id:clientId,redirect_uri:location.origin+location.pathname,response_type:'code',scope:'https://www.googleapis.com/auth/drive.appdata',code_challenge:ch,code_challenge_method:'S256',state:'gd_auth'});
+  // GIS implicit flow — no client_secret, no PKCE needed
+  const params=new URLSearchParams({
+    client_id:clientId,
+    redirect_uri:location.origin+location.pathname,
+    response_type:'token',
+    scope:'https://www.googleapis.com/auth/drive.appdata',
+    state:'gd_auth_implicit',
+    include_granted_scopes:'true'
   });
+  location.href='https://accounts.google.com/o/oauth2/v2/auth?'+params;
 }
-function disconnectGD(){sessionStorage.removeItem('tf_gd_token');localStorage.removeItem('tf_gd_clientid');toast('Google Drive getrennt');renderSettings();initSyncStatus();}
-async function handleGDCallback(){
-  const p=new URLSearchParams(location.search);
-  if(p.get('state')!=='gd_auth'||!p.get('code'))return false;
-  const cid=localStorage.getItem('tf_gd_clientid'),ver=sessionStorage.getItem('tf_gd_verifier');
-  if(!cid||!ver)return false;
-  history.replaceState({},'',location.pathname);
-  try{
-    const r=await fetch('https://oauth2.googleapis.com/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({code:p.get('code'),client_id:cid,redirect_uri:location.origin+location.pathname,grant_type:'authorization_code',code_verifier:ver})});
-    const data=await r.json();
-    if(data.access_token){sessionStorage.setItem('tf_gd_token',data.access_token);toast('Google Drive verbunden ✓','success');return true;}
-  }catch{toast('Google Auth Fehler','error');}
+
+function disconnectGD(){
+  sessionStorage.removeItem('tf_gd_token');
+  localStorage.removeItem('tf_gd_clientid');
+  toast('Google Drive getrennt');renderSettings();initSyncStatus();
+}
+
+function handleGDCallback(){
+  // Implicit flow returns token in URL hash
+  const hash=new URLSearchParams(location.hash.replace('#',''));
+  const params=new URLSearchParams(location.search);
+  
+  // Check hash for implicit flow token
+  if(hash.get('access_token')&&(hash.get('state')==='gd_auth_implicit'||params.get('state')==='gd_auth_implicit')){
+    const token=hash.get('access_token');
+    sessionStorage.setItem('tf_gd_token',token);
+    history.replaceState({},'',location.pathname);
+    toast('Google Drive verbunden ✓','success');
+    return true;
+  }
   return false;
 }
 async function syncNow(){
@@ -1179,7 +1193,7 @@ function emergencyReset(){
 // ── INIT ──
 async function init(){
   if(checkShareParam())return;
-  const gdHandled=await handleGDCallback();
+  const gdHandled=handleGDCallback();
   if(!localStorage.getItem(AUTH_KEY)){
     document.getElementById('lockScreen').style.display='none';
     document.getElementById('setupScreen').style.display='flex';
