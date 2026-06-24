@@ -413,7 +413,7 @@
 
 <script>
 // ── VERSION ──
-const APP_VERSION = '1.1.7';
+const APP_VERSION = '1.1.8';
 
 // ── KEYS ──
 const STORAGE_KEY='tf_data', SALT_KEY='tf_salt', AUTH_KEY='tf_auth', METHOD_KEY='tf_method', PINLEN_KEY='tf_pinlen';
@@ -591,6 +591,11 @@ function launchApp(){
   renderSidebar();selectView('myday');updateCounts();initSyncStatus();
   // Auto-reconnect GD if client ID saved but token expired
   setTimeout(()=>silentReconnectGD(),1000);
+  // Load from Drive on startup and refresh UI if remote is newer
+  setTimeout(async()=>{
+    const refreshed=await loadFromDrive();
+    if(refreshed){renderSidebar();renderTasks();updateCounts();}
+  },1500);
   if(window.innerWidth<=768){
     document.getElementById('menuBtn').style.display='flex';
     document.getElementById('settingsMenuBtn').style.display='flex';
@@ -1157,20 +1162,95 @@ function silentReconnectGD(){
   };
   document.body.appendChild(iframe);
 }
+async function gdFindFile(token){
+  const fn='taskflow-data.json';
+  const r=await fetch(`https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=name='${fn}'&fields=files(id,modifiedTime)`,{headers:{Authorization:'Bearer '+token}});
+  const d=await r.json();
+  return d.files?.[0]||null;
+}
+async function gdUpload(token,fileId,body){
+  if(fileId){
+    await fetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`,{method:'PATCH',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body});
+  }else{
+    const m=await(await fetch('https://www.googleapis.com/drive/v3/files',{method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify({name:'taskflow-data.json',parents:['appDataFolder']})})).json();
+    await fetch(`https://www.googleapis.com/upload/drive/v3/files/${m.id}?uploadType=media`,{method:'PATCH',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body});
+    return m.id;
+  }
+  return fileId;
+}
+async function gdDownload(token,fileId){
+  const r=await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,{headers:{Authorization:'Bearer '+token}});
+  return await r.json();
+}
+
+async function loadFromDrive(){
+  const token=getGDToken();
+  if(!token)return false;
+  try{
+    setSyncStatus('syncing','Lade von Drive...');
+    const file=await gdFindFile(token);
+    if(!file)return false; // nothing on drive yet
+    const remote=await gdDownload(token,file.id);
+    if(!remote||!remote.tasks)return false;
+    // Merge: use whichever was synced more recently
+    const localSync=state.meta?.lastSync?new Date(state.meta.lastSync).getTime():0;
+    const remoteSync=remote.meta?.lastSync?new Date(remote.meta.lastSync).getTime():0;
+    if(remoteSync>localSync){
+      // Remote is newer — load it
+      state=remote;
+      if(!state.settings.display)state.settings.display={notes:true,priority:true,dueDate:true,recur:true,subtasks:true,listDot:true};
+      ['notes','priority','dueDate','recur','subtasks','listDot'].forEach(k=>{if(state.settings.display[k]===undefined)state.settings.display[k]=true;});
+      await saveData();
+      setSyncStatus('ok','Synchronisiert');
+      return true;
+    }else{
+      // Local is newer — upload it
+      await gdUpload(token,file.id,JSON.stringify(state));
+      state.meta.lastSync=new Date().toISOString();
+      await saveData();
+      setSyncStatus('ok','Synchronisiert');
+      return false; // no UI refresh needed
+    }
+  }catch(e){
+    console.error('loadFromDrive error',e);
+    setSyncStatus('error','Drive-Fehler');
+    return false;
+  }
+}
+
 async function syncNow(){
-  const token=getGDToken();if(!token){setSyncStatus('error','Token abgelaufen');silentReconnectGD();toast('Verbindung wird erneuert...','');return;}
+  const token=getGDToken();
+  if(!token){setSyncStatus('error','Token abgelaufen');silentReconnectGD();toast('Verbindung wird erneuert...','');return;}
   setSyncStatus('syncing','Synchronisiert...');
   try{
-    const fn='taskflow-data.json';
-    const sr=await(await fetch(`https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=name='${fn}'`,{headers:{Authorization:'Bearer '+token}})).json();
-    const fid=sr.files?.[0]?.id,body=JSON.stringify(state);
-    if(fid)await fetch(`https://www.googleapis.com/upload/drive/v3/files/${fid}?uploadType=media`,{method:'PATCH',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body});
-    else{const m=await(await fetch('https://www.googleapis.com/drive/v3/files',{method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify({name:fn,parents:['appDataFolder']})})).json();
-      await fetch(`https://www.googleapis.com/upload/drive/v3/files/${m.id}?uploadType=media`,{method:'PATCH',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body});}
-    state.meta.lastSync=new Date().toISOString();await saveData();
-    setSyncStatus('ok','Synchronisiert');toast('Sync ✓','success');
+    const file=await gdFindFile(token);
+    if(file){
+      // Check if remote is newer first
+      const remote=await gdDownload(token,file.id);
+      const localSync=state.meta?.lastSync?new Date(state.meta.lastSync).getTime():0;
+      const remoteSync=remote.meta?.lastSync?new Date(remote.meta.lastSync).getTime():0;
+      if(remoteSync>localSync){
+        state=remote;
+        if(!state.settings.display)state.settings.display={notes:true,priority:true,dueDate:true,recur:true,subtasks:true,listDot:true};
+        await saveData();
+        renderSidebar();renderTasks();updateCounts();
+        toast('Daten von Drive geladen ✓','success');
+      } else {
+        state.meta.lastSync=new Date().toISOString();
+        await gdUpload(token,file.id,JSON.stringify(state));
+        await saveData();
+        toast('Sync ✓','success');
+      }
+    } else {
+      // First time — upload
+      state.meta.lastSync=new Date().toISOString();
+      await gdUpload(token,null,JSON.stringify(state));
+      await saveData();
+      toast('Sync ✓','success');
+    }
+    setSyncStatus('ok','Synchronisiert');
     if(document.getElementById('settingsPanel').style.display!=='none')renderSettings();
-  }catch{setSyncStatus('error','Sync-Fehler');toast('Sync fehlgeschlagen','error');}
+  }catch(e){setSyncStatus('error','Sync-Fehler');toast('Sync fehlgeschlagen','error');}
 }
 function debouncedSync(){clearTimeout(syncTimer);syncTimer=setTimeout(()=>{if(getGDToken())syncNow();},10000);}
 function initSyncStatus(){const t=getGDToken();const cid=localStorage.getItem('tf_gd_clientid');if(t){setSyncStatus('ok','Verbunden');}else if(cid){setSyncStatus('syncing','Wird verbunden...');silentReconnectGD();}else{setSyncStatus('error','Nicht verbunden');}}
