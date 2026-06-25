@@ -421,7 +421,7 @@
 
 <script>
 // ── VERSION ──
-const APP_VERSION = '1.1.13';
+const APP_VERSION = '1.1.14';
 
 // ── KEYS ──
 const STORAGE_KEY='tf_data', SALT_KEY='tf_salt', AUTH_KEY='tf_auth', METHOD_KEY='tf_method', PINLEN_KEY='tf_pinlen';
@@ -530,7 +530,7 @@ async function submitSetup(){
     await setAuthHash(p1);sessionStorage.setItem('tf_pw',p1);
   }
   state.lists=[{id:uid(),name:'Arbeit',color:'#00C9A7'},{id:uid(),name:'Privat',color:'#3B82F6'},{id:uid(),name:'Einkauf',color:'#F59E0B'}];
-  await saveData();
+  await saveData(false);
   document.getElementById('setupScreen').style.display='none';
   launchApp();
 }
@@ -875,7 +875,7 @@ async function toggleTaskDone(id){
 }
 async function togglePin(id){
   const t=getTask(id);if(!t)return;t.pinMyDay=!t.pinMyDay;
-  await saveData();renderTasks();updateCounts();
+  await saveData(true);renderTasks();updateCounts();
 }
 function scheduleRecurring(task){
   if(!task.dueDate)return;
@@ -1134,7 +1134,7 @@ async function changePassword(){
   if(nw!==prompt('Bestätigen:')){toast('Stimmt nicht überein','error');return;}
   if(m==='pin')localStorage.setItem(PINLEN_KEY,String(nw.length));
   await setAuthHash(nw);sessionStorage.setItem('tf_pw',nw);
-  localStorage.removeItem(SALT_KEY);await saveData();
+  localStorage.removeItem(SALT_KEY);await saveData(false);
   toast('Erfolgreich geändert ✓','success');renderSettings();
 }
 async function changeAuthMethod(){
@@ -1147,7 +1147,7 @@ async function changeAuthMethod(){
   state.settings.method=nm;
   if(nm==='pin')localStorage.setItem(PINLEN_KEY,String(nw.length));
   await setAuthHash(nw);sessionStorage.setItem('tf_pw',nw);
-  localStorage.removeItem(SALT_KEY);await saveData();
+  localStorage.removeItem(SALT_KEY);await saveData(false);
   toast(`Methode auf ${nm==='pin'?'PIN':'Passwort'} geändert ✓`,'success');renderSettings();
 }
 
@@ -1165,7 +1165,7 @@ function importJSON(){
       const data=JSON.parse(await file.text());
       if(!data.lists||!data.tasks)throw new Error('invalid');
       if(!data.settings.display)data.settings.display={notes:true,priority:true,dueDate:true,recur:true,subtasks:true,listDot:true};
-      state=data;await saveData();renderSidebar();renderTasks();updateCounts();renderSettings();
+      state=data;await saveData(true);renderSidebar();renderTasks();updateCounts();renderSettings();
       toast('Import erfolgreich ✓','success');
     }catch{toast('Fehler beim Importieren','error');}};
   inp.click();
@@ -1250,7 +1250,8 @@ function reconnectGD(){
         toast('Google Drive verbunden ✓','success');
         setSyncStatus('ok','Verbunden');
         renderSettings();
-        syncNow();
+        // Sync once after reconnect
+        setTimeout(syncNow,1000);
       }
     }catch(e){/* cross-origin while loading — ignore */}
     if(popup.closed){
@@ -1260,7 +1261,7 @@ function reconnectGD(){
         toast('Google Drive verbunden ✓','success');
         setSyncStatus('ok','Verbunden');
         renderSettings();
-        syncNow();
+        setTimeout(syncNow,1000);
       }
     }
   },500);
@@ -1315,7 +1316,8 @@ function silentReconnectGD(){
         done=true;
         storeGDToken(t, parseInt(h.get('expires_in')||'3600'));
         setSyncStatus('ok','Verbunden');
-        syncNow();
+        // Only load from drive on silent reconnect, don't upload
+        loadFromDrive().then(refreshed=>{if(refreshed){renderSidebar();renderTasks();updateCounts();}});
       } else {
         // Silent failed — show reconnect button
         setSyncStatus('error','Token abgelaufen');
