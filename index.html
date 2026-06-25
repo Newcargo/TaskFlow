@@ -7,7 +7,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="TaskFlow">
-<title>TaskFlow</title>
+<title>TaskFlow v1.1.24</title>
 <!-- Favicon as inline SVG data URI -->
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%230F1B2D'/><rect x='4' y='4' width='24' height='24' rx='6' fill='%231E2D42'/><circle cx='16' cy='16' r='9' fill='none' stroke='%2300C9A7' stroke-width='2'/><polyline points='11,16 14.5,19.5 21,13' fill='none' stroke='%2300C9A7' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/></svg>">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -419,7 +419,7 @@
 
 <script>
 // ── VERSION ──
-const APP_VERSION = '1.1.22';
+const APP_VERSION = '1.1.24';
 
 // ── KEYS ──
 const STORAGE_KEY='tf_data', SALT_KEY='tf_salt', AUTH_KEY='tf_auth', METHOD_KEY='tf_method', PINLEN_KEY='tf_pinlen';
@@ -594,6 +594,7 @@ async function pinPress(k,pinLen){
 // ── LAUNCH ──
 function launchApp(){
   document.getElementById('app').style.display='flex';
+  document.title='TaskFlow v'+APP_VERSION;
   const vl=document.getElementById('versionLabel');if(vl)vl.textContent='v'+APP_VERSION;
   renderSidebar();selectView('myday');updateCounts();initSyncStatus();
   // Auto-reconnect GD if client ID saved but token expired
@@ -693,16 +694,12 @@ function renderTasks(){
   const c=document.getElementById('tasksContainer');c.innerHTML='';
   const tasks=getViewTasks();
   const prioOrd={high:0,mid:1,low:2,'':3};
-  // Sort by sortOrder if set, otherwise by prio+date
-  const sort=(arr)=>{
-    const withOrder=arr.filter(t=>t.sortOrder!=null);
-    const withoutOrder=arr.filter(t=>t.sortOrder==null);
-    // If most tasks have sortOrder, use it; otherwise use prio+date
-    if(withOrder.length >= withoutOrder.length && arr.length > 0){
-      return arr.slice().sort((a,b)=>(a.sortOrder||0)-(b.sortOrder||0));
-    }
-    return arr.slice().sort((a,b)=>(prioOrd[a.priority||'']||3)-(prioOrd[b.priority||'']||3)||(a.dueDate||'z').localeCompare(b.dueDate||'z'));
-  };
+  // Always sort by sortOrder (0 = not yet sorted, goes to end)
+  // Initialize sortOrder for tasks that don't have it
+  const allVisible=tasks.filter(t=>!t.done);
+  const maxSO=Math.max(0,...allVisible.filter(t=>t.sortOrder).map(t=>t.sortOrder));
+  allVisible.filter(t=>!t.sortOrder).forEach((t,i)=>{ t.sortOrder=maxSO+(i+1)*1000; });
+  const sort=(arr)=>arr.slice().sort((a,b)=>(a.sortOrder||0)-(b.sortOrder||0));
   const open=sort(tasks.filter(t=>!t.done));
   const done=sort(tasks.filter(t=>t.done));
 
