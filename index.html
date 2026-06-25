@@ -421,7 +421,7 @@
 
 <script>
 // ── VERSION ──
-const APP_VERSION = '1.1.12';
+const APP_VERSION = '1.1.13';
 
 // ── KEYS ──
 const STORAGE_KEY='tf_data', SALT_KEY='tf_salt', AUTH_KEY='tf_auth', METHOD_KEY='tf_method', PINLEN_KEY='tf_pinlen';
@@ -466,11 +466,11 @@ async function decryptData(b64,pw){
   const pt=await crypto.subtle.decrypt({name:'AES-GCM',iv:buf.slice(0,12)},key,buf.slice(12));
   return JSON.parse(new TextDecoder().decode(pt));
 }
-async function saveData(){
+async function saveData(triggerSync=false){
   const pw=sessionStorage.getItem('tf_pw');if(!pw)return;
   localStorage.setItem(METHOD_KEY,state.settings.method||'password');
   localStorage.setItem(STORAGE_KEY,await encryptData(state,pw));
-  debouncedSync();
+  if(triggerSync)debouncedSync();
 }
 async function loadData(pw){
   const enc=localStorage.getItem(STORAGE_KEY);
@@ -694,8 +694,10 @@ function renderTasks(){
   const c=document.getElementById('tasksContainer');c.innerHTML='';
   const tasks=getViewTasks();
   const prioOrd={high:0,mid:1,low:2,'':3};
-  // In list view respect manual order; in smart views sort by prio+date
-  const sort=(arr)=>currentView==='list'?arr:arr.sort((a,b)=>(prioOrd[a.priority||'']||3)-(prioOrd[b.priority||'']||3)||(a.dueDate||'z').localeCompare(b.dueDate||'z'));
+  // In list view sort by sortOrder (manual); in smart views sort by prio+date
+  const sort=(arr)=>currentView==='list'
+    ?arr.slice().sort((a,b)=>(a.sortOrder||0)-(b.sortOrder||0))
+    :arr.slice().sort((a,b)=>(prioOrd[a.priority||'']||3)-(prioOrd[b.priority||'']||3)||(a.dueDate||'z').localeCompare(b.dueDate||'z'));
   const open=sort(tasks.filter(t=>!t.done));
   const done=sort(tasks.filter(t=>t.done));
 
@@ -832,15 +834,34 @@ function initDragDrop(el, taskId){
 }
 
 async function reorderTasks(fromId, toId){
-  // Find indices in the full task array
-  const fromIdx=state.tasks.findIndex(t=>t.id===fromId);
-  const toIdx=state.tasks.findIndex(t=>t.id===toId);
+  const fromTask=getTask(fromId);
+  const toTask=getTask(toId);
+  if(!fromTask||!toTask)return;
+
+  // Get all visible sorted tasks in current view
+  const viewTasks=getViewTasks();
+  const prioOrd={high:0,mid:1,low:2,'':3};
+  const sorted=currentView==='list'
+    ?viewTasks.slice().sort((a,b)=>(a.sortOrder||0)-(b.sortOrder||0))
+    :viewTasks.slice().sort((a,b)=>(prioOrd[a.priority||'']||3)-(prioOrd[b.priority||'']||3)||(a.dueDate||'z').localeCompare(b.dueDate||'z'));
+
+  const fromIdx=sorted.findIndex(t=>t.id===fromId);
+  const toIdx=sorted.findIndex(t=>t.id===toId);
   if(fromIdx===-1||toIdx===-1)return;
-  // Move task
-  const [moved]=state.tasks.splice(fromIdx,1);
-  const newToIdx=state.tasks.findIndex(t=>t.id===toId);
-  state.tasks.splice(newToIdx,0,moved);
-  await saveData();
+
+  // Reassign sortOrder values based on new position
+  // Remove fromTask, insert at toIdx position
+  const reordered=sorted.filter(t=>t.id!==fromId);
+  const insertAt=toIdx>fromIdx?toIdx:toIdx;
+  reordered.splice(insertAt,0,fromTask);
+
+  // Assign clean sortOrder values with gaps
+  reordered.forEach((t,i)=>{
+    const stateTask=getTask(t.id);
+    if(stateTask)stateTask.sortOrder=(i+1)*1000;
+  });
+
+  await saveData(true);
   renderTasks();
 }
 
@@ -849,7 +870,7 @@ async function toggleTaskDone(id){
   const task=getTask(id);if(!task)return;
   task.done=!task.done;task.doneAt=task.done?new Date().toISOString():null;
   if(task.done&&task.recur&&task.recur!=='none')scheduleRecurring(task);
-  await saveData();renderTasks();updateCounts();renderSidebar();
+  await saveData(true);renderTasks();updateCounts();renderSidebar();
   if(editingTaskId===id)renderDrawer(id);
 }
 async function togglePin(id){
@@ -866,12 +887,12 @@ function scheduleRecurring(task){
 }
 async function deleteTask(id){
   state.tasks=state.tasks.filter(t=>t.id!==id);closeDrawer();
-  await saveData();renderTasks();updateCounts();renderSidebar();toast('Aufgabe gelöscht');
+  await saveData(true);renderTasks();updateCounts();renderSidebar();toast('Aufgabe gelöscht');
 }
 async function deleteAllDone(){
   const ids=getViewTasks().filter(t=>t.done).map(t=>t.id);
   state.tasks=state.tasks.filter(t=>!ids.includes(t.id));
-  await saveData();renderTasks();updateCounts();renderSidebar();
+  await saveData(true);renderTasks();updateCounts();renderSidebar();
   toast(`${ids.length} Aufgabe${ids.length!==1?'n':''} gelöscht`);
 }
 
@@ -880,8 +901,8 @@ function handleQuickAdd(e){if(e.key==='Enter')submitQuickAdd();}
 async function submitQuickAdd(){
   const inp=document.getElementById('quickAddInput'),title=inp.value.trim();if(!title)return;
   const listId=currentView==='list'?currentListId:(state.lists[0]?.id||null);
-  state.tasks.push({id:uid(),title,listId,done:false,doneAt:null,priority:'',dueDate:currentView==='myday'?today():'',notes:'',subtasks:[],recur:'none',pinMyDay:currentView==='myday',createdAt:new Date().toISOString()});
-  inp.value='';await saveData();renderTasks();updateCounts();renderSidebar();
+  const maxOrder=state.tasks.filter(t=>t.listId===(currentView==='list'?currentListId:state.lists[0]?.id)).reduce((m,t)=>Math.max(m,t.sortOrder||0),0);  state.tasks.push({id:uid(),title,listId,done:false,doneAt:null,priority:'',dueDate:currentView==='myday'?today():'',notes:'',subtasks:[],recur:'none',pinMyDay:currentView==='myday',createdAt:new Date().toISOString(),sortOrder:maxOrder+1000});
+  inp.value='';await saveData(true);renderTasks();updateCounts();renderSidebar();
 }
 
 // ── DRAWER ──
@@ -926,14 +947,14 @@ function renderDrawer(id){
     <button class="btn-danger" onclick="deleteTask('${id}')" style="flex:1">Löschen</button>
     <button class="btn-secondary" onclick="toggleTaskDone('${id}')" style="flex:1">${task.done?'Wiederherstellen':'Erledigen'}</button>`;
 }
-async function updateField(id,field,value){const t=getTask(id);if(!t)return;t[field]=value;await saveData();renderTasks();updateCounts();renderSidebar();}
-async function setPrio(id,p){const t=getTask(id);t.priority=t.priority===p?'':p;await saveData();renderDrawer(id);renderTasks();}
-async function toggleSub(tid,i){const t=getTask(tid);t.subtasks[i].done=!t.subtasks[i].done;await saveData();renderDrawer(tid);renderTasks();}
-async function deleteSub(tid,i){const t=getTask(tid);t.subtasks.splice(i,1);await saveData();renderDrawer(tid);renderTasks();}
+async function updateField(id,field,value){const t=getTask(id);if(!t)return;t[field]=value;await saveData(true);renderTasks();updateCounts();renderSidebar();}
+async function setPrio(id,p){const t=getTask(id);t.priority=t.priority===p?'':p;await saveData(true);renderDrawer(id);renderTasks();}
+async function toggleSub(tid,i){const t=getTask(tid);t.subtasks[i].done=!t.subtasks[i].done;await saveData(true);renderDrawer(tid);renderTasks();}
+async function deleteSub(tid,i){const t=getTask(tid);t.subtasks.splice(i,1);await saveData(true);renderDrawer(tid);renderTasks();}
 async function addSub(tid){
   const inp=document.getElementById('newSub'),title=inp.value.trim();if(!title)return;
   getTask(tid).subtasks.push({id:uid(),title,done:false});inp.value='';
-  await saveData();renderDrawer(tid);renderTasks();
+  await saveData(true);renderDrawer(tid);renderTasks();
 }
 
 // ── ADD TASK MODAL ──
@@ -963,8 +984,8 @@ function selNewPrio(p){
 async function createTask(){
   const title=document.getElementById('ntTitle')?.value.trim();
   if(!title){toast('Titel erforderlich','error');return false;}
-  state.tasks.push({id:uid(),title,listId:document.getElementById('ntList')?.value,done:false,doneAt:null,priority:newPrio,dueDate:document.getElementById('ntDate')?.value||'',notes:'',subtasks:[],recur:'none',pinMyDay:currentView==='myday',createdAt:new Date().toISOString()});
-  newPrio='';await saveData();renderTasks();updateCounts();renderSidebar();return true;
+  const _lid=document.getElementById('ntList')?.value;const _maxO=state.tasks.filter(t=>t.listId===_lid).reduce((m,t)=>Math.max(m,t.sortOrder||0),0);  state.tasks.push({id:uid(),title,listId:_lid,done:false,doneAt:null,priority:newPrio,dueDate:document.getElementById('ntDate')?.value||'',notes:'',subtasks:[],recur:'none',pinMyDay:currentView==='myday',createdAt:new Date().toISOString(),sortOrder:_maxO+1000});
+  newPrio='';await saveData(true);renderTasks();updateCounts();renderSidebar();return true;
 }
 
 // ── LISTS ──
@@ -980,7 +1001,7 @@ function openAddListModal(){
       const name=document.getElementById('nlName')?.value.trim();
       if(!name){toast('Name erforderlich','error');return false;}
       state.lists.push({id:uid(),name,color:document.querySelector('.color-swatch.sel')?.dataset.color||defColor});
-      await saveData();renderSidebar();return true;}});
+      await saveData(true);renderSidebar();return true;}});
   setTimeout(()=>document.getElementById('nlName')?.focus(),80);
 }
 function pickColor(c,el){document.querySelectorAll('.color-swatch').forEach(s=>s.classList.remove('sel'));el.classList.add('sel');}
@@ -992,8 +1013,8 @@ function openListMenu(listId){
       <div class="color-picker">${COLORS.map(c=>`<div class="color-swatch${c===list.color?' sel':''}" style="background:${c}" onclick="pickColor('${c}',this)" data-color="${c}"></div>`).join('')}</div>
     </div>`,
     confirm:'Speichern',danger:'Liste löschen',
-    onDanger:async()=>{if(!confirm('Liste und alle Aufgaben löschen?'))return false;state.lists=state.lists.filter(l=>l.id!==listId);state.tasks=state.tasks.filter(t=>t.listId!==listId);await saveData();renderSidebar();if(currentListId===listId)selectView('all');return true;},
-    onConfirm:async()=>{list.name=document.getElementById('elName').value.trim()||list.name;list.color=document.querySelector('.color-swatch.sel')?.dataset.color||list.color;await saveData();renderSidebar();if(currentListId===listId)selectList(listId);return true;}});
+    onDanger:async()=>{if(!confirm('Liste und alle Aufgaben löschen?'))return false;state.lists=state.lists.filter(l=>l.id!==listId);state.tasks=state.tasks.filter(t=>t.listId!==listId);await saveData(true);renderSidebar();if(currentListId===listId)selectView('all');return true;},
+    onConfirm:async()=>{list.name=document.getElementById('elName').value.trim()||list.name;list.color=document.querySelector('.color-swatch.sel')?.dataset.color||list.color;await saveData(true);renderSidebar();if(currentListId===listId)selectList(listId);return true;}});
 }
 
 // ── SHARE ──
@@ -1101,7 +1122,7 @@ function renderSettings(){
 
 async function toggleDisp(key){
   state.settings.display[key]=!state.settings.display[key];
-  await saveData();renderSettings();renderTasks();
+  await saveData(false);renderSettings();renderTasks();
 }
 async function changePassword(){
   const cur=prompt('Aktuelles Passwort / PIN:');if(cur===null)return;
@@ -1363,14 +1384,14 @@ async function loadFromDrive(){
       state=remote;
       if(!state.settings.display)state.settings.display={notes:true,priority:true,dueDate:true,recur:true,subtasks:true,listDot:true};
       ['notes','priority','dueDate','recur','subtasks','listDot'].forEach(k=>{if(state.settings.display[k]===undefined)state.settings.display[k]=true;});
-      await saveData();
+      await saveData(false);
       setSyncStatus('ok','Synchronisiert');
       return true;
     }else{
       // Local is newer — upload it
       await gdUpload(token,file.id,JSON.stringify(state));
       state.meta.lastSync=new Date().toISOString();
-      await saveData();
+      await saveData(false);
       setSyncStatus('ok','Synchronisiert');
       return false; // no UI refresh needed
     }
@@ -1395,29 +1416,42 @@ async function syncNow(){
       if(remoteSync>localSync){
         state=remote;
         if(!state.settings.display)state.settings.display={notes:true,priority:true,dueDate:true,recur:true,subtasks:true,listDot:true};
-        await saveData();
+        await saveData(false);
         renderSidebar();renderTasks();updateCounts();
         toast('Daten von Drive geladen ✓','success');
       } else {
         state.meta.lastSync=new Date().toISOString();
         await gdUpload(token,file.id,JSON.stringify(state));
-        await saveData();
+        await saveData(false); // don't re-trigger sync
         toast('Sync ✓','success');
       }
     } else {
       // First time — upload
       state.meta.lastSync=new Date().toISOString();
       await gdUpload(token,null,JSON.stringify(state));
-      await saveData();
+      await saveData(false);
       toast('Sync ✓','success');
     }
     setSyncStatus('ok','Synchronisiert');
     if(document.getElementById('settingsPanel').style.display!=='none')renderSettings();
   }catch(e){setSyncStatus('error','Sync-Fehler');toast('Sync fehlgeschlagen','error');}
 }
-function debouncedSync(){clearTimeout(syncTimer);syncTimer=setTimeout(()=>{if(getGDToken())syncNow();},10000);}
+function debouncedSync(){
+  // Option C: trigger sync 4 seconds after last change
+  clearTimeout(syncTimer);
+  syncTimer=setTimeout(async()=>{
+    if(getGDToken()){
+      await syncNow();
+    }
+  },4000);
+}
 function initSyncStatus(){const t=getGDToken();const cid=localStorage.getItem('tf_gd_clientid');if(t){setSyncStatus('ok','Verbunden');}else if(cid){setSyncStatus('syncing','Wird verbunden...');silentReconnectGD();}else{setSyncStatus('error','Nicht verbunden');}}
-function setSyncStatus(s,lbl){document.getElementById('syncDot').className='sync-dot '+s;document.getElementById('syncLabel').textContent=lbl;}
+function setSyncStatus(s,lbl){
+  document.getElementById('syncDot').className='sync-dot '+s;
+  document.getElementById('syncLabel').textContent=lbl;
+  // Remove reconnect button if status is ok
+  if(s==='ok'){const b=document.getElementById('reconnectBtn');if(b)b.remove();}
+}
 
 // ── SIDEBAR MOBILE ──
 function toggleSidebar(){document.getElementById('sidebar').classList.toggle('open');document.getElementById('sidebarOverlay').classList.toggle('show');}
