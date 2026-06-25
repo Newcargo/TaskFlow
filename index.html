@@ -235,6 +235,14 @@
   #readonlyView{display:none;flex-direction:column;min-height:100vh;padding:32px;max-width:600px;margin:0 auto}
   .readonly-task{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;margin-bottom:8px;display:flex;gap:12px;align-items:flex-start}
 
+  /* ── DRAG & DROP ── */
+  .task-item{touch-action:none}
+  .task-item.dragging{opacity:.4;border:2px dashed var(--teal);background:var(--surface2)}
+  .task-item.drag-over{border-top:3px solid var(--teal);margin-top:-1px}
+  .drag-handle{color:var(--text-mute);font-size:16px;cursor:grab;padding:2px 6px 2px 0;flex-shrink:0;touch-action:none;user-select:none;display:flex;align-items:center}
+  .drag-handle:active{cursor:grabbing}
+  .drag-handle:hover{color:var(--text-dim)}
+
   /* ── MOBILE ── */
   @media(max-width:1200px){
     #sidebar{position:fixed;inset:0 auto 0 0;z-index:200;transform:translateX(-100%);width:82vw;max-width:320px}
@@ -413,7 +421,7 @@
 
 <script>
 // ── VERSION ──
-const APP_VERSION = '1.1.10';
+const APP_VERSION = '1.1.12';
 
 // ── KEYS ──
 const STORAGE_KEY='tf_data', SALT_KEY='tf_salt', AUTH_KEY='tf_auth', METHOD_KEY='tf_method', PINLEN_KEY='tf_pinlen';
@@ -686,7 +694,8 @@ function renderTasks(){
   const c=document.getElementById('tasksContainer');c.innerHTML='';
   const tasks=getViewTasks();
   const prioOrd={high:0,mid:1,low:2,'':3};
-  const sort=(arr)=>arr.sort((a,b)=>(prioOrd[a.priority||'']||3)-(prioOrd[b.priority||'']||3)||(a.dueDate||'z').localeCompare(b.dueDate||'z'));
+  // In list view respect manual order; in smart views sort by prio+date
+  const sort=(arr)=>currentView==='list'?arr:arr.sort((a,b)=>(prioOrd[a.priority||'']||3)-(prioOrd[b.priority||'']||3)||(a.dueDate||'z').localeCompare(b.dueDate||'z'));
   const open=sort(tasks.filter(t=>!t.done));
   const done=sort(tasks.filter(t=>t.done));
 
@@ -720,6 +729,7 @@ function buildTaskEl(task){
     d.subtasks&&subTotal?`<span class="task-badge badge-sub">☑ ${subDone}/${subTotal}</span>`:''
   ].filter(Boolean).join('');
   el.innerHTML=`
+    <div class="drag-handle" title="Ziehen zum Sortieren">⠿</div>
     <div class="task-check" onclick="event.stopPropagation();toggleTaskDone('${task.id}')"><span class="task-check-icon">✓</span></div>
     ${d.listDot&&list?`<div class="task-list-dot" style="background:${list.color}"></div>`:''}
     <div class="task-body">
@@ -729,7 +739,109 @@ function buildTaskEl(task){
     </div>
     <div class="task-pin${task.pinMyDay?' pinned':''}" onclick="event.stopPropagation();togglePin('${task.id}')" title="${task.pinMyDay?'Von Mein Tag entfernen':'Zu Mein Tag hinzufügen'}">📌</div>`;
   el.addEventListener('click',()=>openDrawer(task.id));
+  initDragDrop(el, task.id);
   return el;
+}
+
+// ── DRAG & DROP ──
+let dragSrcId=null, dragTouchY=0, dragClone=null, dragScrollTimer=null;
+
+function initDragDrop(el, taskId){
+  const handle=el.querySelector('.drag-handle');
+
+  // ── MOUSE (desktop) ──
+  handle.addEventListener('mousedown', e=>{
+    el.draggable=true;
+  });
+  el.addEventListener('dragstart', e=>{
+    if(!el.draggable)return;
+    dragSrcId=taskId;
+    setTimeout(()=>el.classList.add('dragging'),0);
+    e.dataTransfer.effectAllowed='move';
+  });
+  el.addEventListener('dragend', e=>{
+    el.draggable=false;
+    el.classList.remove('dragging');
+    document.querySelectorAll('.drag-over').forEach(x=>x.classList.remove('drag-over'));
+  });
+  el.addEventListener('dragover', e=>{
+    e.preventDefault();
+    if(dragSrcId===taskId)return;
+    document.querySelectorAll('.drag-over').forEach(x=>x.classList.remove('drag-over'));
+    el.classList.add('drag-over');
+  });
+  el.addEventListener('dragleave', ()=>el.classList.remove('drag-over'));
+  el.addEventListener('drop', e=>{
+    e.preventDefault();
+    el.classList.remove('drag-over');
+    if(dragSrcId&&dragSrcId!==taskId) reorderTasks(dragSrcId, taskId);
+  });
+
+  // ── TOUCH (mobile/tablet) ──
+  handle.addEventListener('touchstart', e=>{
+    e.stopPropagation();
+    dragSrcId=taskId;
+    dragTouchY=e.touches[0].clientY;
+    // Create visual clone
+    const rect=el.getBoundingClientRect();
+    dragClone=el.cloneNode(true);
+    dragClone.style.cssText=`position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;z-index:999;opacity:.85;pointer-events:none;box-shadow:0 8px 24px rgba(0,0,0,.5);border-radius:var(--radius);`;
+    document.body.appendChild(dragClone);
+    el.classList.add('dragging');
+  },{passive:true});
+
+  handle.addEventListener('touchmove', e=>{
+    e.preventDefault();
+    if(!dragClone)return;
+    const touch=e.touches[0];
+    const dy=touch.clientY-dragTouchY;
+    const rect=el.getBoundingClientRect();
+    dragClone.style.top=(rect.top+dy)+'px';
+
+    // Find element under touch
+    dragClone.style.display='none';
+    const under=document.elementFromPoint(touch.clientX,touch.clientY);
+    dragClone.style.display='';
+    const targetEl=under?.closest('.task-item');
+    document.querySelectorAll('.drag-over').forEach(x=>x.classList.remove('drag-over'));
+    if(targetEl&&targetEl!==el){
+      const tid=targetEl.dataset.id;
+      if(tid&&tid!==taskId)targetEl.classList.add('drag-over');
+    }
+
+    // Auto-scroll
+    const container=document.getElementById('tasksContainer');
+    const cRect=container.getBoundingClientRect();
+    if(touch.clientY>cRect.bottom-60)container.scrollTop+=8;
+    if(touch.clientY<cRect.top+60)container.scrollTop-=8;
+  },{passive:false});
+
+  handle.addEventListener('touchend', e=>{
+    if(dragClone){dragClone.remove();dragClone=null;}
+    el.classList.remove('dragging');
+    document.querySelectorAll('.drag-over').forEach(x=>x.classList.remove('drag-over'));
+    const touch=e.changedTouches[0];
+    const under=document.elementFromPoint(touch.clientX,touch.clientY);
+    const targetEl=under?.closest('.task-item');
+    if(targetEl&&targetEl!==el){
+      const tid=targetEl.dataset.id;
+      if(tid&&tid!==taskId)reorderTasks(dragSrcId,tid);
+    }
+    dragSrcId=null;
+  },{passive:true});
+}
+
+async function reorderTasks(fromId, toId){
+  // Find indices in the full task array
+  const fromIdx=state.tasks.findIndex(t=>t.id===fromId);
+  const toIdx=state.tasks.findIndex(t=>t.id===toId);
+  if(fromIdx===-1||toIdx===-1)return;
+  // Move task
+  const [moved]=state.tasks.splice(fromIdx,1);
+  const newToIdx=state.tasks.findIndex(t=>t.id===toId);
+  state.tasks.splice(newToIdx,0,moved);
+  await saveData();
+  renderTasks();
 }
 
 // ── TASK ACTIONS ──
@@ -1075,20 +1187,68 @@ function showGDGuide(){
     confirm:'Verbinden →',onConfirm:async()=>{connectGD();return true;}});
 }
 
-function connectGD(){
-  const clientId=prompt('Google OAuth Client-ID einfügen\n(endet auf .apps.googleusercontent.com):');
-  if(!clientId?.includes('.apps.googleusercontent.com')){toast('Ungültige Client-ID','error');return;}
-  localStorage.setItem('tf_gd_clientid',clientId);
-  // GIS implicit flow — no client_secret, no PKCE needed
-  const params=new URLSearchParams({
+function gdAuthUrl(clientId, prompt){
+  return 'https://accounts.google.com/o/oauth2/v2/auth?'+new URLSearchParams({
     client_id:clientId,
     redirect_uri:location.origin+location.pathname,
     response_type:'token',
     scope:'https://www.googleapis.com/auth/drive.appdata',
     state:'gd_auth_implicit',
+    prompt:prompt||'',
     include_granted_scopes:'true'
   });
-  location.href='https://accounts.google.com/o/oauth2/v2/auth?'+params;
+}
+
+function connectGD(){
+  const clientId=prompt('Google OAuth Client-ID einfügen\n(endet auf .apps.googleusercontent.com):');
+  if(!clientId?.includes('.apps.googleusercontent.com')){toast('Ungültige Client-ID','error');return;}
+  localStorage.setItem('tf_gd_clientid',clientId);
+  location.href=gdAuthUrl(clientId,'select_account');
+}
+
+function reconnectGD(){
+  // Called when token expired — reuse saved client ID, open popup
+  const clientId=localStorage.getItem('tf_gd_clientid');
+  if(!clientId){toast('Bitte erst verbinden','error');return;}
+  const url=gdAuthUrl(clientId,'');
+  const popup=window.open(url,'gdauth','width=500,height=600,left=200,top=100');
+  if(!popup){
+    // Popup blocked — fallback to redirect
+    location.href=url;
+    return;
+  }
+  // Poll until popup closes or token appears in localStorage
+  const poll=setInterval(()=>{
+    try{
+      const h=new URLSearchParams(popup.location.hash.replace('#',''));
+      const t=h.get('access_token');
+      if(t){
+        storeGDToken(t, parseInt(h.get('expires_in')||'3600'));
+        popup.close();
+        clearInterval(poll);
+        toast('Google Drive verbunden ✓','success');
+        setSyncStatus('ok','Verbunden');
+        renderSettings();
+        syncNow();
+      }
+    }catch(e){/* cross-origin while loading — ignore */}
+    if(popup.closed){
+      clearInterval(poll);
+      // Check if token was stored via handleGDCallback
+      if(getGDToken()){
+        toast('Google Drive verbunden ✓','success');
+        setSyncStatus('ok','Verbunden');
+        renderSettings();
+        syncNow();
+      }
+    }
+  },500);
+}
+
+function storeGDToken(token, expiresIn){
+  const expiresAt=Date.now()+(expiresIn*1000)-120000; // 2 min buffer
+  localStorage.setItem('tf_gd_token',token);
+  localStorage.setItem('tf_gd_expires',String(expiresAt));
 }
 
 function disconnectGD(){
@@ -1099,15 +1259,9 @@ function disconnectGD(){
 }
 
 function handleGDCallback(){
-  // Implicit flow returns token in URL hash
   const hash=new URLSearchParams(location.hash.replace('#',''));
-  if(hash.get('access_token')){
-    const token=hash.get('access_token');
-    const expiresIn=parseInt(hash.get('expires_in')||'3600');
-    const expiresAt=Date.now()+(expiresIn*1000)-60000; // 1 min buffer
-    // Store token + expiry persistently
-    localStorage.setItem('tf_gd_token',token);
-    localStorage.setItem('tf_gd_expires',String(expiresAt));
+  if(hash.get('access_token')&&hash.get('state')==='gd_auth_implicit'){
+    storeGDToken(hash.get('access_token'), parseInt(hash.get('expires_in')||'3600'));
     history.replaceState({},'',location.pathname);
     toast('Google Drive verbunden ✓','success');
     return true;
@@ -1123,44 +1277,53 @@ function getGDToken(){
 }
 
 function silentReconnectGD(){
-  // If we have a client ID but token is expired, silently refresh in background iframe
   const clientId=localStorage.getItem('tf_gd_clientid');
-  const token=getGDToken();
-  if(!clientId||token)return; // already connected or no client ID saved
-  
+  if(!clientId||getGDToken())return;
+  // Try silent iframe first
   setSyncStatus('syncing','Verbinde...');
-  const params=new URLSearchParams({
-    client_id:clientId,
-    redirect_uri:location.origin+location.pathname,
-    response_type:'token',
-    scope:'https://www.googleapis.com/auth/drive.appdata',
-    state:'gd_auth_implicit',
-    prompt:'none', // silent — no popup shown to user
-    include_granted_scopes:'true'
-  });
-  // Use hidden iframe for silent token refresh
   const iframe=document.createElement('iframe');
   iframe.style.display='none';
-  iframe.src='https://accounts.google.com/o/oauth2/v2/auth?'+params;
+  iframe.src=gdAuthUrl(clientId,'none');
+  let done=false;
   iframe.onload=()=>{
+    if(done)return;
     try{
-      const iHash=new URLSearchParams(iframe.contentWindow.location.hash.replace('#',''));
-      const t=iHash.get('access_token');
+      const h=new URLSearchParams(iframe.contentWindow.location.hash.replace('#',''));
+      const t=h.get('access_token');
       if(t){
-        const exp=parseInt(iHash.get('expires_in')||'3600');
-        localStorage.setItem('tf_gd_token',t);
-        localStorage.setItem('tf_gd_expires',String(Date.now()+(exp*1000)-60000));
+        done=true;
+        storeGDToken(t, parseInt(h.get('expires_in')||'3600'));
         setSyncStatus('ok','Verbunden');
-        toast('Google Drive reconnected ✓','success');
         syncNow();
+      } else {
+        // Silent failed — show reconnect button
+        setSyncStatus('error','Token abgelaufen');
+        showReconnectHint();
       }
     }catch(e){
-      // Cross-origin error = user needs to re-auth manually (expected after long time)
-      setSyncStatus('error','Bitte neu verbinden');
+      // Cross-origin = needs user interaction
+      if(!done){done=true;setSyncStatus('error','Token abgelaufen');showReconnectHint();}
     }
-    document.body.removeChild(iframe);
+    if(document.body.contains(iframe))document.body.removeChild(iframe);
   };
+  setTimeout(()=>{
+    if(!done){done=true;setSyncStatus('error','Token abgelaufen');showReconnectHint();if(document.body.contains(iframe))document.body.removeChild(iframe);}
+  },5000);
   document.body.appendChild(iframe);
+}
+
+function showReconnectHint(){
+  // Show reconnect button in sync status bar
+  document.getElementById('syncLabel').innerHTML='Token abgelaufen';
+  const btn=document.getElementById('reconnectBtn');
+  if(!btn){
+    const b=document.createElement('button');
+    b.id='reconnectBtn';b.className='icon-btn';
+    b.title='Neu verbinden';b.textContent='🔑';
+    b.style.cssText='margin-left:4px;color:var(--amber)';
+    b.onclick=reconnectGD;
+    document.querySelector('.sync-status').appendChild(b);
+  }
 }
 async function gdFindFile(token){
   const fn='taskflow-data.json';
@@ -1220,7 +1383,7 @@ async function loadFromDrive(){
 
 async function syncNow(){
   const token=getGDToken();
-  if(!token){setSyncStatus('error','Token abgelaufen');silentReconnectGD();toast('Verbindung wird erneuert...','');return;}
+  if(!token){const cid=localStorage.getItem('tf_gd_clientid');if(cid){showReconnectHint();setSyncStatus('error','Token abgelaufen');}else{toast('Google Drive nicht verbunden','error');}return;}
   setSyncStatus('syncing','Synchronisiert...');
   try{
     const file=await gdFindFile(token);
