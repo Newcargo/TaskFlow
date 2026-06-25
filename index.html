@@ -323,7 +323,7 @@
 
     <div id="sidebar">
       <div class="sidebar-header">
-        <span class="app-logo">✅ TaskFlow</span>
+        <div><span class="app-logo">✅ TaskFlow</span><div id="versionLabel" style="font-size:10px;color:var(--text-mute);margin-top:1px;padding-left:2px"></div></div>
         <button class="icon-btn" onclick="openSettings()" title="Einstellungen">⚙️</button>
       </div>
       <div class="sidebar-nav">
@@ -419,7 +419,7 @@
 
 <script>
 // ── VERSION ──
-const APP_VERSION = '1.1.20';
+const APP_VERSION = '1.1.21';
 
 // ── KEYS ──
 const STORAGE_KEY='tf_data', SALT_KEY='tf_salt', AUTH_KEY='tf_auth', METHOD_KEY='tf_method', PINLEN_KEY='tf_pinlen';
@@ -594,6 +594,7 @@ async function pinPress(k,pinLen){
 // ── LAUNCH ──
 function launchApp(){
   document.getElementById('app').style.display='flex';
+  const vl=document.getElementById('versionLabel');if(vl)vl.textContent='v'+APP_VERSION;
   renderSidebar();selectView('myday');updateCounts();initSyncStatus();
   // Auto-reconnect GD if client ID saved but token expired
   setTimeout(()=>silentReconnectGD(),1000);
@@ -698,11 +699,7 @@ function renderTasks(){
     :arr.slice().sort((a,b)=>(prioOrd[a.priority||'']||3)-(prioOrd[b.priority||'']||3)||(a.dueDate||'z').localeCompare(b.dueDate||'z'));
   // Initialize sortOrder for list view tasks that don't have it
   if(currentView==='list'){
-    const unsorted=tasks.filter(t=>!t.done&&!t.sortOrder);
-    if(unsorted.length){
-      const maxO=Math.max(0,...tasks.filter(t=>t.sortOrder).map(t=>t.sortOrder));
-      unsorted.forEach((t,i)=>t.sortOrder=maxO+(i+1)*1000);
-    }
+    tasks.filter(t=>t.sortOrder==null).forEach((t,i)=>{ t.sortOrder=(i+1)*1000; });
   }
   const open=sort(tasks.filter(t=>!t.done));
   const done=sort(tasks.filter(t=>t.done));
@@ -712,6 +709,14 @@ function renderTasks(){
     return;
   }
   open.forEach(t=>c.appendChild(buildTaskEl(t)));
+
+  // Event delegation for sort buttons
+  c.addEventListener('click', function handleSortClick(e){
+    const btn=e.target.closest('.sort-btn');
+    if(!btn)return;
+    e.stopPropagation();
+    moveTask(btn);
+  },{once:true});
 
   // Done tasks always visible at bottom
   if(done.length>0){
@@ -740,8 +745,8 @@ function buildTaskEl(task){
   const tid=task.id;
   const arrowsHTML=(currentView==='list'&&!task.done)
     ?('<div class="sort-arrows">'
-      +'<button class="sort-btn" id="up_'+tid+'" onclick="event.stopPropagation();moveTask(this)" data-taskid="'+tid+'" data-dir="-1" title="Nach oben">▲</button>'
-      +'<button class="sort-btn" id="dn_'+tid+'" onclick="event.stopPropagation();moveTask(this)" data-taskid="'+tid+'" data-dir="1" title="Nach unten">▼</button>'
+      +'<button class="sort-btn" id="up_'+tid+'" data-taskid="'+tid+'" data-dir="-1" title="Nach oben">▲</button>'
+      +'<button class="sort-btn" id="dn_'+tid+'" data-taskid="'+tid+'" data-dir="1" title="Nach unten">▼</button>'
       +'</div>')
     :'';
   el.innerHTML=`
