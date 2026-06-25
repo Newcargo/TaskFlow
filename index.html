@@ -235,13 +235,11 @@
   #readonlyView{display:none;flex-direction:column;min-height:100vh;padding:32px;max-width:600px;margin:0 auto}
   .readonly-task{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;margin-bottom:8px;display:flex;gap:12px;align-items:flex-start}
 
-  /* ── DRAG & DROP ── */
-  .task-item.dragging{opacity:.35;border:2px dashed var(--teal)!important;background:var(--surface2)}
-  .task-item.drag-over-top{border-top:3px solid var(--teal)!important}
-  .task-item.drag-over-bot{border-bottom:3px solid var(--teal)!important}
-  .drag-handle{color:var(--text-mute);font-size:18px;cursor:grab;padding:2px 8px 2px 0;flex-shrink:0;touch-action:none;user-select:none;-webkit-user-select:none;display:flex;align-items:center;line-height:1}
-  .drag-handle:hover{color:var(--teal)}
-  .drag-clone{position:fixed;z-index:9999;pointer-events:none;opacity:.85;box-shadow:0 8px 32px rgba(0,0,0,.6);border-radius:10px;background:var(--surface2);border:1px solid var(--teal)}
+  /* ── SORT ARROWS ── */
+  .sort-arrows{display:flex;flex-direction:column;gap:2px;flex-shrink:0;margin-right:2px}
+  .sort-btn{background:none;border:none;color:var(--text-mute);font-size:13px;line-height:1;padding:1px 4px;cursor:pointer;border-radius:3px;transition:color .15s,background .15s}
+  .sort-btn:hover{color:var(--teal);background:rgba(0,201,167,.1)}
+  .sort-btn:disabled{opacity:.15;cursor:default}
 
   /* ── MOBILE ── */
   @media(max-width:1200px){
@@ -421,7 +419,7 @@
 
 <script>
 // ── VERSION ──
-const APP_VERSION = '1.1.17';
+const APP_VERSION = '1.1.18';
 
 // ── KEYS ──
 const STORAGE_KEY='tf_data', SALT_KEY='tf_salt', AUTH_KEY='tf_auth', METHOD_KEY='tf_method', PINLEN_KEY='tf_pinlen';
@@ -732,7 +730,10 @@ function buildTaskEl(task){
     d.subtasks&&subTotal?`<span class="task-badge badge-sub">☑ ${subDone}/${subTotal}</span>`:''
   ].filter(Boolean).join('');
   el.innerHTML=`
-    <div class="drag-handle" title="Ziehen zum Sortieren">⠿</div>
+    <div class="sort-arrows">
+      <button class="sort-btn" id="up_${task.id}" onclick="event.stopPropagation();moveTask('${task.id}',-1)" title="Nach oben">▲</button>
+      <button class="sort-btn" id="dn_${task.id}" onclick="event.stopPropagation();moveTask('${task.id}',1)" title="Nach unten">▼</button>
+    </div>
     <div class="task-check" onclick="event.stopPropagation();toggleTaskDone('${task.id}')"><span class="task-check-icon">✓</span></div>
     ${d.listDot&&list?`<div class="task-list-dot" style="background:${list.color}"></div>`:''}
     <div class="task-body">
@@ -741,140 +742,40 @@ function buildTaskEl(task){
       ${badges?`<div class="task-meta">${badges}</div>`:''}
     </div>
     <div class="task-pin${task.pinMyDay?' pinned':''}" onclick="event.stopPropagation();togglePin('${task.id}')" title="${task.pinMyDay?'Von Mein Tag entfernen':'Zu Mein Tag hinzufügen'}">📌</div>`;
-  // Only open drawer if not dragging
-  el.addEventListener('click', e=>{
-    if(e.target.closest('.drag-handle'))return;
-    openDrawer(task.id);
-  });
-  initDragDrop(el, task.id);
+  el.addEventListener('click', e=>{ if(e.target.closest('.sort-arrows'))return; openDrawer(task.id); });
   return el;
 }
 
 // ── DRAG & DROP ──
-let dragState=null;
+async function moveTask(taskId, dir){
+  // Get current view tasks with sortOrder initialized
+  const viewTasks = getViewTasks().filter(t => !t.done);
+  viewTasks.forEach((t,i) => { if(t.sortOrder==null) t.sortOrder=(i+1)*1000; });
+  const sorted = viewTasks.slice().sort((a,b) => (a.sortOrder||0)-(b.sortOrder||0));
 
-function initDragDrop(el, taskId){
-  const handle=el.querySelector('.drag-handle');
-  if(!handle)return;
+  const idx = sorted.findIndex(t => t.id === taskId);
+  const swapIdx = idx + dir;
+  if(idx === -1 || swapIdx < 0 || swapIdx >= sorted.length) return;
 
-  // MOUSE
-  handle.addEventListener('mousedown', e=>{
-    e.preventDefault();
-    e.stopPropagation();
-    startDrag(el, taskId, e.clientX, e.clientY);
-    const onMove=e2=>moveDrag(e2.clientX, e2.clientY);
-    const onUp=e2=>{
-      e2.stopPropagation();
-      endDrag(e2.clientX, e2.clientY);
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-    };
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-  });
+  // Swap sortOrder values
+  const tmp = sorted[idx].sortOrder;
+  sorted[idx].sortOrder = sorted[swapIdx].sortOrder;
+  sorted[swapIdx].sortOrder = tmp;
 
-  // TOUCH
-  handle.addEventListener('touchstart', e=>{
-    e.preventDefault();
-    e.stopPropagation();
-    const t=e.touches[0];
-    startDrag(el, taskId, t.clientX, t.clientY);
-  },{passive:false});
-
-  handle.addEventListener('touchmove', e=>{
-    e.preventDefault();
-    const t=e.touches[0];
-    moveDrag(t.clientX, t.clientY);
-  },{passive:false});
-
-  handle.addEventListener('touchend', e=>{
-    e.stopPropagation();
-    const t=e.changedTouches[0];
-    endDrag(t.clientX, t.clientY);
-  },{passive:true});
-}
-
-function startDrag(el, taskId, cx, cy){
-  const rect=el.getBoundingClientRect();
-  const clone=document.createElement('div');
-  clone.className='drag-clone';
-  clone.style.cssText=`left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;`;
-  // Simple label in clone
-  const title=el.querySelector('.task-title');
-  clone.innerHTML=`<div style="display:flex;align-items:center;gap:10px;padding:4px 8px"><span style="color:var(--teal)">⠿</span><span>${title?title.textContent:''}</span></div>`;
-  document.body.appendChild(clone);
-  el.classList.add('dragging');
-  dragState={id:taskId, el, clone, startY:cy, origTop:rect.top, target:null};
-}
-
-function moveDrag(cx, cy){
-  if(!dragState)return;
-  const dy=cy-dragState.startY;
-  dragState.clone.style.top=(dragState.origTop+dy)+'px';
-
-  // Auto-scroll
-  const container=document.getElementById('tasksContainer');
-  const cr=container.getBoundingClientRect();
-  if(cy>cr.bottom-60)container.scrollTop+=6;
-  else if(cy<cr.top+60)container.scrollTop-=6;
-
-  // Find target
-  dragState.clone.style.visibility='hidden';
-  const under=document.elementFromPoint(cx, cy);
-  dragState.clone.style.visibility='visible';
-
-  document.querySelectorAll('.drag-over-top,.drag-over-bot').forEach(x=>{
-    x.classList.remove('drag-over-top','drag-over-bot');
-  });
-
-  const targetEl=under?.closest('.task-item');
-  if(targetEl && targetEl!==dragState.el && targetEl.dataset.id){
-    const tRect=targetEl.getBoundingClientRect();
-    const before=cy < tRect.top+tRect.height/2;
-    targetEl.classList.add(before?'drag-over-top':'drag-over-bot');
-    dragState.target={el:targetEl, id:targetEl.dataset.id, before};
-  } else {
-    dragState.target=null;
-  }
-}
-
-async function endDrag(cx, cy){
-  if(!dragState)return;
-  dragState.clone.remove();
-  dragState.el.classList.remove('dragging');
-  document.querySelectorAll('.drag-over-top,.drag-over-bot').forEach(x=>{
-    x.classList.remove('drag-over-top','drag-over-bot');
-  });
-  const {id, target}=dragState;
-  dragState=null;
-  if(target && target.id !== id){
-    await reorderTasks(id, target.id, target.before);
-  }
-}
-
-async function reorderTasks(fromId, toId, insertBefore){
-  // Get tasks in current view, initialize sortOrder if missing
-  const viewTasks=getViewTasks();
-  viewTasks.forEach((t,i)=>{if(t.sortOrder==null)t.sortOrder=(i+1)*1000;});
-  const sorted=viewTasks.slice().sort((a,b)=>(a.sortOrder||0)-(b.sortOrder||0));
-
-  const fromIdx=sorted.findIndex(t=>t.id===fromId);
-  const toIdx=sorted.findIndex(t=>t.id===toId);
-  if(fromIdx===-1||toIdx===-1)return;
-
-  // Remove from position, insert at new position
-  const reordered=sorted.filter(t=>t.id!==fromId);
-  const insertIdx=reordered.findIndex(t=>t.id===toId);
-  reordered.splice(insertBefore?insertIdx:insertIdx+1, 0, getTask(fromId));
-
-  // Write sortOrder back
-  reordered.forEach((t,i)=>{
-    const st=getTask(t.id);
-    if(st)st.sortOrder=(i+1)*1000;
+  // Write back to state
+  sorted.forEach(t => {
+    const st = getTask(t.id);
+    if(st) st.sortOrder = t.sortOrder;
   });
 
   await saveData(true);
   renderTasks();
+
+  // Restore focus to the moved task's button after re-render
+  setTimeout(() => {
+    const btn = document.getElementById((dir===-1?'up_':'dn_')+taskId);
+    if(btn) btn.focus();
+  }, 50);
 }
 
 
