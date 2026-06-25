@@ -421,7 +421,7 @@
 
 <script>
 // ── VERSION ──
-const APP_VERSION = '1.1.16';
+const APP_VERSION = '1.1.17';
 
 // ── KEYS ──
 const STORAGE_KEY='tf_data', SALT_KEY='tf_salt', AUTH_KEY='tf_auth', METHOD_KEY='tf_method', PINLEN_KEY='tf_pinlen';
@@ -741,33 +741,44 @@ function buildTaskEl(task){
       ${badges?`<div class="task-meta">${badges}</div>`:''}
     </div>
     <div class="task-pin${task.pinMyDay?' pinned':''}" onclick="event.stopPropagation();togglePin('${task.id}')" title="${task.pinMyDay?'Von Mein Tag entfernen':'Zu Mein Tag hinzufügen'}">📌</div>`;
-  el.addEventListener('click',()=>openDrawer(task.id));
+  // Only open drawer if not dragging
+  el.addEventListener('click', e=>{
+    if(e.target.closest('.drag-handle'))return;
+    openDrawer(task.id);
+  });
   initDragDrop(el, task.id);
   return el;
 }
 
 // ── DRAG & DROP ──
-let dragState=null; // {id, el, clone, startY, startX, lastTarget}
+let dragState=null;
 
 function initDragDrop(el, taskId){
   const handle=el.querySelector('.drag-handle');
   if(!handle)return;
 
-  // ══ MOUSE ══
+  // MOUSE
   handle.addEventListener('mousedown', e=>{
     e.preventDefault();
-    startDrag(taskId, el, e.clientX, e.clientY);
+    e.stopPropagation();
+    startDrag(el, taskId, e.clientX, e.clientY);
     const onMove=e2=>moveDrag(e2.clientX, e2.clientY);
-    const onUp=e2=>{endDrag(e2.clientX, e2.clientY);document.removeEventListener('mousemove',onMove);document.removeEventListener('mouseup',onUp);};
-    document.addEventListener('mousemove',onMove);
-    document.addEventListener('mouseup',onUp);
+    const onUp=e2=>{
+      e2.stopPropagation();
+      endDrag(e2.clientX, e2.clientY);
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
   });
 
-  // ══ TOUCH ══
+  // TOUCH
   handle.addEventListener('touchstart', e=>{
     e.preventDefault();
+    e.stopPropagation();
     const t=e.touches[0];
-    startDrag(taskId, el, t.clientX, t.clientY);
+    startDrag(el, taskId, t.clientX, t.clientY);
   },{passive:false});
 
   handle.addEventListener('touchmove', e=>{
@@ -777,98 +788,87 @@ function initDragDrop(el, taskId){
   },{passive:false});
 
   handle.addEventListener('touchend', e=>{
+    e.stopPropagation();
     const t=e.changedTouches[0];
     endDrag(t.clientX, t.clientY);
   },{passive:true});
 }
 
-function startDrag(taskId, el, clientX, clientY){
+function startDrag(el, taskId, cx, cy){
   const rect=el.getBoundingClientRect();
-  // Create visual clone
   const clone=document.createElement('div');
   clone.className='drag-clone';
   clone.style.cssText=`left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;`;
-  clone.innerHTML=el.innerHTML;
+  // Simple label in clone
+  const title=el.querySelector('.task-title');
+  clone.innerHTML=`<div style="display:flex;align-items:center;gap:10px;padding:4px 8px"><span style="color:var(--teal)">⠿</span><span>${title?title.textContent:''}</span></div>`;
   document.body.appendChild(clone);
   el.classList.add('dragging');
-  dragState={id:taskId, el, clone, startX:clientX, startY:clientY, origTop:rect.top, origLeft:rect.left, lastTarget:null};
+  dragState={id:taskId, el, clone, startY:cy, origTop:rect.top, target:null};
 }
 
-function moveDrag(clientX, clientY){
+function moveDrag(cx, cy){
   if(!dragState)return;
-  const dy=clientY-dragState.startY;
-  const dx=clientX-dragState.startX;
+  const dy=cy-dragState.startY;
   dragState.clone.style.top=(dragState.origTop+dy)+'px';
 
-  // Auto-scroll container
+  // Auto-scroll
   const container=document.getElementById('tasksContainer');
   const cr=container.getBoundingClientRect();
-  if(clientY>cr.bottom-60)container.scrollTop+=6;
-  else if(clientY<cr.top+60)container.scrollTop-=6;
+  if(cy>cr.bottom-60)container.scrollTop+=6;
+  else if(cy<cr.top+60)container.scrollTop-=6;
 
-  // Find target task element
+  // Find target
   dragState.clone.style.visibility='hidden';
-  const under=document.elementFromPoint(clientX, clientY);
+  const under=document.elementFromPoint(cx, cy);
   dragState.clone.style.visibility='visible';
-  const targetEl=under?.closest('.task-item[data-id]');
 
-  // Clear previous indicators
   document.querySelectorAll('.drag-over-top,.drag-over-bot').forEach(x=>{
     x.classList.remove('drag-over-top','drag-over-bot');
   });
 
-  if(targetEl&&targetEl!==dragState.el){
+  const targetEl=under?.closest('.task-item');
+  if(targetEl && targetEl!==dragState.el && targetEl.dataset.id){
     const tRect=targetEl.getBoundingClientRect();
-    const mid=tRect.top+tRect.height/2;
-    if(clientY<mid)targetEl.classList.add('drag-over-top');
-    else targetEl.classList.add('drag-over-bot');
-    dragState.lastTarget={el:targetEl, before:clientY<mid};
+    const before=cy < tRect.top+tRect.height/2;
+    targetEl.classList.add(before?'drag-over-top':'drag-over-bot');
+    dragState.target={el:targetEl, id:targetEl.dataset.id, before};
   } else {
-    dragState.lastTarget=null;
+    dragState.target=null;
   }
 }
 
-async function endDrag(clientX, clientY){
+async function endDrag(cx, cy){
   if(!dragState)return;
-  // Cleanup visuals
   dragState.clone.remove();
   dragState.el.classList.remove('dragging');
   document.querySelectorAll('.drag-over-top,.drag-over-bot').forEach(x=>{
     x.classList.remove('drag-over-top','drag-over-bot');
   });
-
-  const {id, lastTarget}=dragState;
+  const {id, target}=dragState;
   dragState=null;
-
-  if(lastTarget){
-    const targetId=lastTarget.el.dataset.id;
-    if(targetId&&targetId!==id){
-      await reorderTasks(id, targetId, lastTarget.before);
-    }
+  if(target && target.id !== id){
+    await reorderTasks(id, target.id, target.before);
   }
 }
 
 async function reorderTasks(fromId, toId, insertBefore){
-  console.log('reorder:',fromId,'->',toId,'before:',insertBefore);
-  // Get all tasks in current list/view and sort by current sortOrder
-  let viewTasks=getViewTasks();
-  // Initialize sortOrder for tasks that don't have it yet
-  viewTasks.forEach((t,i)=>{if(!t.sortOrder)t.sortOrder=(i+1)*1000;});
+  // Get tasks in current view, initialize sortOrder if missing
+  const viewTasks=getViewTasks();
+  viewTasks.forEach((t,i)=>{if(t.sortOrder==null)t.sortOrder=(i+1)*1000;});
   const sorted=viewTasks.slice().sort((a,b)=>(a.sortOrder||0)-(b.sortOrder||0));
-  console.log('sorted ids:',sorted.map(t=>t.id));
 
-  // Build new order
-  const withoutFrom=sorted.filter(t=>t.id!==fromId);
-  const toIdx=withoutFrom.findIndex(t=>t.id===toId);
-  if(toIdx===-1)return;
-  const fromTask=getTask(fromId);
-  if(!fromTask)return;
+  const fromIdx=sorted.findIndex(t=>t.id===fromId);
+  const toIdx=sorted.findIndex(t=>t.id===toId);
+  if(fromIdx===-1||toIdx===-1)return;
 
-  const insertAt=insertBefore?toIdx:toIdx+1;
-  withoutFrom.splice(insertAt,0,fromTask);
+  // Remove from position, insert at new position
+  const reordered=sorted.filter(t=>t.id!==fromId);
+  const insertIdx=reordered.findIndex(t=>t.id===toId);
+  reordered.splice(insertBefore?insertIdx:insertIdx+1, 0, getTask(fromId));
 
-  // Write sortOrder back to state tasks
-  withoutFrom.forEach((t,i)=>{
+  // Write sortOrder back
+  reordered.forEach((t,i)=>{
     const st=getTask(t.id);
     if(st)st.sortOrder=(i+1)*1000;
   });
@@ -876,6 +876,7 @@ async function reorderTasks(fromId, toId, insertBefore){
   await saveData(true);
   renderTasks();
 }
+
 
 // ── TASK ACTIONS ──
 async function toggleTaskDone(id){
