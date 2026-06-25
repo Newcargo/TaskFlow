@@ -236,12 +236,12 @@
   .readonly-task{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;margin-bottom:8px;display:flex;gap:12px;align-items:flex-start}
 
   /* ── DRAG & DROP ── */
-  .task-item{touch-action:none}
-  .task-item.dragging{opacity:.4;border:2px dashed var(--teal);background:var(--surface2)}
-  .task-item.drag-over{border-top:3px solid var(--teal);margin-top:-1px}
-  .drag-handle{color:var(--text-mute);font-size:16px;cursor:grab;padding:2px 6px 2px 0;flex-shrink:0;touch-action:none;user-select:none;display:flex;align-items:center}
-  .drag-handle:active{cursor:grabbing}
-  .drag-handle:hover{color:var(--text-dim)}
+  .task-item.dragging{opacity:.35;border:2px dashed var(--teal)!important;background:var(--surface2)}
+  .task-item.drag-over-top{border-top:3px solid var(--teal)!important}
+  .task-item.drag-over-bot{border-bottom:3px solid var(--teal)!important}
+  .drag-handle{color:var(--text-mute);font-size:18px;cursor:grab;padding:2px 8px 2px 0;flex-shrink:0;touch-action:none;user-select:none;-webkit-user-select:none;display:flex;align-items:center;line-height:1}
+  .drag-handle:hover{color:var(--teal)}
+  .drag-clone{position:fixed;z-index:9999;pointer-events:none;opacity:.85;box-shadow:0 8px 32px rgba(0,0,0,.6);border-radius:10px;background:var(--surface2);border:1px solid var(--teal)}
 
   /* ── MOBILE ── */
   @media(max-width:1200px){
@@ -421,7 +421,7 @@
 
 <script>
 // ── VERSION ──
-const APP_VERSION = '1.1.14';
+const APP_VERSION = '1.1.15';
 
 // ── KEYS ──
 const STORAGE_KEY='tf_data', SALT_KEY='tf_salt', AUTH_KEY='tf_auth', METHOD_KEY='tf_method', PINLEN_KEY='tf_pinlen';
@@ -746,119 +746,129 @@ function buildTaskEl(task){
 }
 
 // ── DRAG & DROP ──
-let dragSrcId=null, dragTouchY=0, dragClone=null, dragScrollTimer=null;
+let dragState=null; // {id, el, clone, startY, startX, lastTarget}
 
 function initDragDrop(el, taskId){
   const handle=el.querySelector('.drag-handle');
+  if(!handle)return;
 
-  // ── MOUSE (desktop) ──
+  // ══ MOUSE ══
   handle.addEventListener('mousedown', e=>{
-    el.draggable=true;
-  });
-  el.addEventListener('dragstart', e=>{
-    if(!el.draggable)return;
-    dragSrcId=taskId;
-    setTimeout(()=>el.classList.add('dragging'),0);
-    e.dataTransfer.effectAllowed='move';
-  });
-  el.addEventListener('dragend', e=>{
-    el.draggable=false;
-    el.classList.remove('dragging');
-    document.querySelectorAll('.drag-over').forEach(x=>x.classList.remove('drag-over'));
-  });
-  el.addEventListener('dragover', e=>{
     e.preventDefault();
-    if(dragSrcId===taskId)return;
-    document.querySelectorAll('.drag-over').forEach(x=>x.classList.remove('drag-over'));
-    el.classList.add('drag-over');
-  });
-  el.addEventListener('dragleave', ()=>el.classList.remove('drag-over'));
-  el.addEventListener('drop', e=>{
-    e.preventDefault();
-    el.classList.remove('drag-over');
-    if(dragSrcId&&dragSrcId!==taskId) reorderTasks(dragSrcId, taskId);
+    startDrag(taskId, el, e.clientX, e.clientY);
+    const onMove=e2=>moveDrag(e2.clientX, e2.clientY);
+    const onUp=e2=>{endDrag(e2.clientX, e2.clientY);document.removeEventListener('mousemove',onMove);document.removeEventListener('mouseup',onUp);};
+    document.addEventListener('mousemove',onMove);
+    document.addEventListener('mouseup',onUp);
   });
 
-  // ── TOUCH (mobile/tablet) ──
+  // ══ TOUCH ══
   handle.addEventListener('touchstart', e=>{
-    e.stopPropagation();
-    dragSrcId=taskId;
-    dragTouchY=e.touches[0].clientY;
-    // Create visual clone
-    const rect=el.getBoundingClientRect();
-    dragClone=el.cloneNode(true);
-    dragClone.style.cssText=`position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;z-index:999;opacity:.85;pointer-events:none;box-shadow:0 8px 24px rgba(0,0,0,.5);border-radius:var(--radius);`;
-    document.body.appendChild(dragClone);
-    el.classList.add('dragging');
-  },{passive:true});
+    e.preventDefault();
+    const t=e.touches[0];
+    startDrag(taskId, el, t.clientX, t.clientY);
+  },{passive:false});
 
   handle.addEventListener('touchmove', e=>{
     e.preventDefault();
-    if(!dragClone)return;
-    const touch=e.touches[0];
-    const dy=touch.clientY-dragTouchY;
-    const rect=el.getBoundingClientRect();
-    dragClone.style.top=(rect.top+dy)+'px';
-
-    // Find element under touch
-    dragClone.style.display='none';
-    const under=document.elementFromPoint(touch.clientX,touch.clientY);
-    dragClone.style.display='';
-    const targetEl=under?.closest('.task-item');
-    document.querySelectorAll('.drag-over').forEach(x=>x.classList.remove('drag-over'));
-    if(targetEl&&targetEl!==el){
-      const tid=targetEl.dataset.id;
-      if(tid&&tid!==taskId)targetEl.classList.add('drag-over');
-    }
-
-    // Auto-scroll
-    const container=document.getElementById('tasksContainer');
-    const cRect=container.getBoundingClientRect();
-    if(touch.clientY>cRect.bottom-60)container.scrollTop+=8;
-    if(touch.clientY<cRect.top+60)container.scrollTop-=8;
+    const t=e.touches[0];
+    moveDrag(t.clientX, t.clientY);
   },{passive:false});
 
   handle.addEventListener('touchend', e=>{
-    if(dragClone){dragClone.remove();dragClone=null;}
-    el.classList.remove('dragging');
-    document.querySelectorAll('.drag-over').forEach(x=>x.classList.remove('drag-over'));
-    const touch=e.changedTouches[0];
-    const under=document.elementFromPoint(touch.clientX,touch.clientY);
-    const targetEl=under?.closest('.task-item');
-    if(targetEl&&targetEl!==el){
-      const tid=targetEl.dataset.id;
-      if(tid&&tid!==taskId)reorderTasks(dragSrcId,tid);
-    }
-    dragSrcId=null;
+    const t=e.changedTouches[0];
+    endDrag(t.clientX, t.clientY);
   },{passive:true});
 }
 
-async function reorderTasks(fromId, toId){
-  const fromTask=getTask(fromId);
-  const toTask=getTask(toId);
-  if(!fromTask||!toTask)return;
+function startDrag(taskId, el, clientX, clientY){
+  const rect=el.getBoundingClientRect();
+  // Create visual clone
+  const clone=document.createElement('div');
+  clone.className='drag-clone';
+  clone.style.cssText=`left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;`;
+  clone.innerHTML=el.innerHTML;
+  document.body.appendChild(clone);
+  el.classList.add('dragging');
+  dragState={id:taskId, el, clone, startX:clientX, startY:clientY, origTop:rect.top, lastTarget:null};
+}
 
-  // Get all visible sorted tasks in current view
+function moveDrag(clientX, clientY){
+  if(!dragState)return;
+  const dy=clientY-dragState.startY;
+  const dx=clientX-dragState.startX;
+  dragState.clone.style.top=(dragState.origTop+dy)+'px';
+  dragState.clone.style.left=(dragState.clone.getBoundingClientRect().left+dx-(clientX-dragState.startX))+'px';
+  // Actually just move vertically cleanly:
+  dragState.clone.style.top=(dragState.origTop+dy)+'px';
+
+  // Auto-scroll container
+  const container=document.getElementById('tasksContainer');
+  const cr=container.getBoundingClientRect();
+  if(clientY>cr.bottom-60)container.scrollTop+=6;
+  else if(clientY<cr.top+60)container.scrollTop-=6;
+
+  // Find target task element
+  dragState.clone.style.visibility='hidden';
+  const under=document.elementFromPoint(clientX, clientY);
+  dragState.clone.style.visibility='visible';
+  const targetEl=under?.closest('.task-item[data-id]');
+
+  // Clear previous indicators
+  document.querySelectorAll('.drag-over-top,.drag-over-bot').forEach(x=>{
+    x.classList.remove('drag-over-top','drag-over-bot');
+  });
+
+  if(targetEl&&targetEl!==dragState.el){
+    const tRect=targetEl.getBoundingClientRect();
+    const mid=tRect.top+tRect.height/2;
+    if(clientY<mid)targetEl.classList.add('drag-over-top');
+    else targetEl.classList.add('drag-over-bot');
+    dragState.lastTarget={el:targetEl, before:clientY<mid};
+  } else {
+    dragState.lastTarget=null;
+  }
+}
+
+async function endDrag(clientX, clientY){
+  if(!dragState)return;
+  // Cleanup visuals
+  dragState.clone.remove();
+  dragState.el.classList.remove('dragging');
+  document.querySelectorAll('.drag-over-top,.drag-over-bot').forEach(x=>{
+    x.classList.remove('drag-over-top','drag-over-bot');
+  });
+
+  const {id, lastTarget}=dragState;
+  dragState=null;
+
+  if(lastTarget){
+    const targetId=lastTarget.el.dataset.id;
+    if(targetId&&targetId!==id){
+      await reorderTasks(id, targetId, lastTarget.before);
+    }
+  }
+}
+
+async function reorderTasks(fromId, toId, insertBefore){
+  // Get current sorted list for this view
   const viewTasks=getViewTasks();
-  const prioOrd={high:0,mid:1,low:2,'':3};
-  const sorted=currentView==='list'
-    ?viewTasks.slice().sort((a,b)=>(a.sortOrder||0)-(b.sortOrder||0))
-    :viewTasks.slice().sort((a,b)=>(prioOrd[a.priority||'']||3)-(prioOrd[b.priority||'']||3)||(a.dueDate||'z').localeCompare(b.dueDate||'z'));
+  const sorted=viewTasks.slice().sort((a,b)=>(a.sortOrder||0)-(b.sortOrder||0));
 
-  const fromIdx=sorted.findIndex(t=>t.id===fromId);
-  const toIdx=sorted.findIndex(t=>t.id===toId);
-  if(fromIdx===-1||toIdx===-1)return;
+  // Build new order
+  const withoutFrom=sorted.filter(t=>t.id!==fromId);
+  const toIdx=withoutFrom.findIndex(t=>t.id===toId);
+  if(toIdx===-1)return;
+  const fromTask=getTask(fromId);
+  if(!fromTask)return;
 
-  // Reassign sortOrder values based on new position
-  // Remove fromTask, insert at toIdx position
-  const reordered=sorted.filter(t=>t.id!==fromId);
-  const insertAt=toIdx>fromIdx?toIdx:toIdx;
-  reordered.splice(insertAt,0,fromTask);
+  const insertAt=insertBefore?toIdx:toIdx+1;
+  withoutFrom.splice(insertAt,0,fromTask);
 
-  // Assign clean sortOrder values with gaps
-  reordered.forEach((t,i)=>{
-    const stateTask=getTask(t.id);
-    if(stateTask)stateTask.sortOrder=(i+1)*1000;
+  // Write sortOrder back to state tasks
+  withoutFrom.forEach((t,i)=>{
+    const st=getTask(t.id);
+    if(st)st.sortOrder=(i+1)*1000;
   });
 
   await saveData(true);
