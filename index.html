@@ -419,7 +419,7 @@
 
 <script>
 // ── VERSION ──
-const APP_VERSION = '1.1.18';
+const APP_VERSION = '1.1.20';
 
 // ── KEYS ──
 const STORAGE_KEY='tf_data', SALT_KEY='tf_salt', AUTH_KEY='tf_auth', METHOD_KEY='tf_method', PINLEN_KEY='tf_pinlen';
@@ -696,6 +696,14 @@ function renderTasks(){
   const sort=(arr)=>currentView==='list'
     ?arr.slice().sort((a,b)=>(a.sortOrder||0)-(b.sortOrder||0))
     :arr.slice().sort((a,b)=>(prioOrd[a.priority||'']||3)-(prioOrd[b.priority||'']||3)||(a.dueDate||'z').localeCompare(b.dueDate||'z'));
+  // Initialize sortOrder for list view tasks that don't have it
+  if(currentView==='list'){
+    const unsorted=tasks.filter(t=>!t.done&&!t.sortOrder);
+    if(unsorted.length){
+      const maxO=Math.max(0,...tasks.filter(t=>t.sortOrder).map(t=>t.sortOrder));
+      unsorted.forEach((t,i)=>t.sortOrder=maxO+(i+1)*1000);
+    }
+  }
   const open=sort(tasks.filter(t=>!t.done));
   const done=sort(tasks.filter(t=>t.done));
 
@@ -729,11 +737,15 @@ function buildTaskEl(task){
     d.recur&&task.recur&&task.recur!=='none'?`<span class="task-badge badge-recur">🔁</span>`:'',
     d.subtasks&&subTotal?`<span class="task-badge badge-sub">☑ ${subDone}/${subTotal}</span>`:''
   ].filter(Boolean).join('');
+  const tid=task.id;
+  const arrowsHTML=(currentView==='list'&&!task.done)
+    ?('<div class="sort-arrows">'
+      +'<button class="sort-btn" id="up_'+tid+'" onclick="event.stopPropagation();moveTask(this)" data-taskid="'+tid+'" data-dir="-1" title="Nach oben">▲</button>'
+      +'<button class="sort-btn" id="dn_'+tid+'" onclick="event.stopPropagation();moveTask(this)" data-taskid="'+tid+'" data-dir="1" title="Nach unten">▼</button>'
+      +'</div>')
+    :'';
   el.innerHTML=`
-    <div class="sort-arrows">
-      <button class="sort-btn" id="up_${task.id}" onclick="event.stopPropagation();moveTask('${task.id}',-1)" title="Nach oben">▲</button>
-      <button class="sort-btn" id="dn_${task.id}" onclick="event.stopPropagation();moveTask('${task.id}',1)" title="Nach unten">▼</button>
-    </div>
+    ${arrowsHTML}
     <div class="task-check" onclick="event.stopPropagation();toggleTaskDone('${task.id}')"><span class="task-check-icon">✓</span></div>
     ${d.listDot&&list?`<div class="task-list-dot" style="background:${list.color}"></div>`:''}
     <div class="task-body">
@@ -747,34 +759,40 @@ function buildTaskEl(task){
 }
 
 // ── DRAG & DROP ──
-async function moveTask(taskId, dir){
-  // Get current view tasks with sortOrder initialized
-  const viewTasks = getViewTasks().filter(t => !t.done);
-  viewTasks.forEach((t,i) => { if(t.sortOrder==null) t.sortOrder=(i+1)*1000; });
-  const sorted = viewTasks.slice().sort((a,b) => (a.sortOrder||0)-(b.sortOrder||0));
+async function moveTask(btn){
+  const taskId=btn.dataset.taskid;
+  const dir=parseInt(btn.dataset.dir);
+  // Only works in list view
+  if(currentView !== 'list') return;
 
-  const idx = sorted.findIndex(t => t.id === taskId);
+  // Get open tasks in this list, sorted by current sortOrder
+  const listTasks = state.tasks
+    .filter(t => t.listId === currentListId && !t.done);
+
+  // Initialize sortOrder for any task that doesn't have it
+  // Sort by existing sortOrder first, then assign clean values
+  listTasks.sort((a,b) => (a.sortOrder||0) - (b.sortOrder||0));
+  listTasks.forEach((t,i) => { t.sortOrder = (i+1) * 1000; });
+
+  // Now find the task and its neighbour
+  const idx = listTasks.findIndex(t => t.id === taskId);
   const swapIdx = idx + dir;
-  if(idx === -1 || swapIdx < 0 || swapIdx >= sorted.length) return;
+  if(idx === -1 || swapIdx < 0 || swapIdx >= listTasks.length) return;
 
-  // Swap sortOrder values
-  const tmp = sorted[idx].sortOrder;
-  sorted[idx].sortOrder = sorted[swapIdx].sortOrder;
-  sorted[swapIdx].sortOrder = tmp;
-
-  // Write back to state
-  sorted.forEach(t => {
-    const st = getTask(t.id);
-    if(st) st.sortOrder = t.sortOrder;
-  });
+  // Swap their sortOrder values directly on state objects
+  const a = listTasks[idx];
+  const b = listTasks[swapIdx];
+  const tmp = a.sortOrder;
+  a.sortOrder = b.sortOrder;
+  b.sortOrder = tmp;
 
   await saveData(true);
   renderTasks();
 
-  // Restore focus to the moved task's button after re-render
+  // Restore focus
   setTimeout(() => {
-    const btn = document.getElementById((dir===-1?'up_':'dn_')+taskId);
-    if(btn) btn.focus();
+    const focusBtn = document.getElementById((dir===-1?'up_':'dn_')+taskId);
+    if(focusBtn) focusBtn.focus();
   }, 50);
 }
 
