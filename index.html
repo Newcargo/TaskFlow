@@ -421,7 +421,7 @@
 
 <script>
 // ── VERSION ──
-const APP_VERSION = '1.1.15';
+const APP_VERSION = '1.1.16';
 
 // ── KEYS ──
 const STORAGE_KEY='tf_data', SALT_KEY='tf_salt', AUTH_KEY='tf_auth', METHOD_KEY='tf_method', PINLEN_KEY='tf_pinlen';
@@ -720,6 +720,7 @@ function buildTaskEl(task){
   const d=disp();
   const el=document.createElement('div');
   el.className='task-item'+(task.done?' done':'')+(isOverdue(task.dueDate)&&!task.done?' overdue':'')+(isToday(task.dueDate)&&!task.done?' due-today':'');
+  el.dataset.id=task.id;
   const subDone=(task.subtasks||[]).filter(s=>s.done).length,subTotal=(task.subtasks||[]).length;
   const prioLabel={high:'🔴 Hoch',mid:'🟡 Mittel',low:'🔵 Tief'}[task.priority]||'';
   const prioClass={high:'badge-prio-high',mid:'badge-prio-mid',low:'badge-prio-low'}[task.priority]||'';
@@ -790,16 +791,13 @@ function startDrag(taskId, el, clientX, clientY){
   clone.innerHTML=el.innerHTML;
   document.body.appendChild(clone);
   el.classList.add('dragging');
-  dragState={id:taskId, el, clone, startX:clientX, startY:clientY, origTop:rect.top, lastTarget:null};
+  dragState={id:taskId, el, clone, startX:clientX, startY:clientY, origTop:rect.top, origLeft:rect.left, lastTarget:null};
 }
 
 function moveDrag(clientX, clientY){
   if(!dragState)return;
   const dy=clientY-dragState.startY;
   const dx=clientX-dragState.startX;
-  dragState.clone.style.top=(dragState.origTop+dy)+'px';
-  dragState.clone.style.left=(dragState.clone.getBoundingClientRect().left+dx-(clientX-dragState.startX))+'px';
-  // Actually just move vertically cleanly:
   dragState.clone.style.top=(dragState.origTop+dy)+'px';
 
   // Auto-scroll container
@@ -851,9 +849,13 @@ async function endDrag(clientX, clientY){
 }
 
 async function reorderTasks(fromId, toId, insertBefore){
-  // Get current sorted list for this view
-  const viewTasks=getViewTasks();
+  console.log('reorder:',fromId,'->',toId,'before:',insertBefore);
+  // Get all tasks in current list/view and sort by current sortOrder
+  let viewTasks=getViewTasks();
+  // Initialize sortOrder for tasks that don't have it yet
+  viewTasks.forEach((t,i)=>{if(!t.sortOrder)t.sortOrder=(i+1)*1000;});
   const sorted=viewTasks.slice().sort((a,b)=>(a.sortOrder||0)-(b.sortOrder||0));
+  console.log('sorted ids:',sorted.map(t=>t.id));
 
   // Build new order
   const withoutFrom=sorted.filter(t=>t.id!==fromId);
