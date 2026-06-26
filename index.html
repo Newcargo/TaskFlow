@@ -7,7 +7,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="TaskFlow">
-<title>TaskFlow v1.1.24</title>
+<title>TaskFlow v1.1.26</title>
 <!-- Favicon as inline SVG data URI -->
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%230F1B2D'/><rect x='4' y='4' width='24' height='24' rx='6' fill='%231E2D42'/><circle cx='16' cy='16' r='9' fill='none' stroke='%2300C9A7' stroke-width='2'/><polyline points='11,16 14.5,19.5 21,13' fill='none' stroke='%2300C9A7' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/></svg>">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -235,6 +235,12 @@
   #readonlyView{display:none;flex-direction:column;min-height:100vh;padding:32px;max-width:600px;margin:0 auto}
   .readonly-task{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;margin-bottom:8px;display:flex;gap:12px;align-items:flex-start}
 
+  /* ── SYNC STATUS ── */
+  .sync-status{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:var(--radius-sm)}
+  #syncBtn{flex-shrink:0}
+  #syncBtn.spinning{animation:spin 1s linear infinite}
+  @keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+
   /* ── SORT ARROWS ── */
   .sort-arrows{display:flex;flex-direction:column;gap:2px;flex-shrink:0;margin-right:2px}
   .sort-btn{background:none;border:none;color:var(--text-mute);font-size:13px;line-height:1;padding:1px 4px;cursor:pointer;border-radius:3px;transition:color .15s,background .15s}
@@ -345,9 +351,13 @@
       <div class="sidebar-footer">
         <div class="sync-status">
           <div class="sync-dot" id="syncDot"></div>
-          <span id="syncLabel">Nicht verbunden</span>
-          <button class="icon-btn" onclick="syncNow()" title="Jetzt sync" style="margin-left:auto">🔄</button>
+          <div style="flex:1;min-width:0">
+            <div id="syncLabel" style="font-size:12px;color:var(--text-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Nicht verbunden</div>
+            <div id="syncSub" style="font-size:10px;color:var(--text-mute);margin-top:1px"></div>
+          </div>
+          <button class="icon-btn" onclick="syncNow()" title="Jetzt sync" id="syncBtn">🔄</button>
         </div>
+        <div id="syncQueue" style="display:none;font-size:10px;color:var(--amber);padding:4px 10px">⏳ <span id="syncQueueCount">0</span> Änderungen ausstehend</div>
       </div>
     </div>
 
@@ -419,7 +429,7 @@
 
 <script>
 // ── VERSION ──
-const APP_VERSION = '1.1.24';
+const APP_VERSION = '1.1.26';
 
 // ── KEYS ──
 const STORAGE_KEY='tf_data', SALT_KEY='tf_salt', AUTH_KEY='tf_auth', METHOD_KEY='tf_method', PINLEN_KEY='tf_pinlen';
@@ -468,7 +478,7 @@ async function saveData(triggerSync=false){
   const pw=sessionStorage.getItem('tf_pw');if(!pw)return;
   localStorage.setItem(METHOD_KEY,state.settings.method||'password');
   localStorage.setItem(STORAGE_KEY,await encryptData(state,pw));
-  if(triggerSync)debouncedSync();
+  if(triggerSync) queueSync();
 }
 async function loadData(pw){
   const enc=localStorage.getItem(STORAGE_KEY);
@@ -694,12 +704,13 @@ function renderTasks(){
   const c=document.getElementById('tasksContainer');c.innerHTML='';
   const tasks=getViewTasks();
   const prioOrd={high:0,mid:1,low:2,'':3};
-  // Always sort by sortOrder (0 = not yet sorted, goes to end)
-  // Initialize sortOrder for tasks that don't have it
+  // Sort by view-specific order field
+  const _soField = currentView==='myday'?'soMyday':currentView==='all'?'soAll':currentView==='overdue'?'soOverdue':'sortOrder';
+  // Initialize if missing
   const allVisible=tasks.filter(t=>!t.done);
-  const maxSO=Math.max(0,...allVisible.filter(t=>t.sortOrder).map(t=>t.sortOrder));
-  allVisible.filter(t=>!t.sortOrder).forEach((t,i)=>{ t.sortOrder=maxSO+(i+1)*1000; });
-  const sort=(arr)=>arr.slice().sort((a,b)=>(a.sortOrder||0)-(b.sortOrder||0));
+  const maxSO=Math.max(0,...allVisible.filter(t=>t[_soField]!=null).map(t=>t[_soField]));
+  allVisible.filter(t=>t[_soField]==null).forEach((t,i)=>{ t[_soField]=maxSO+(i+1)*1000; });
+  const sort=(arr)=>arr.slice().sort((a,b)=>(a[_soField]||0)-(b[_soField]||0));
   const open=sort(tasks.filter(t=>!t.done));
   const done=sort(tasks.filter(t=>t.done));
 
@@ -1001,7 +1012,7 @@ function closeSettings(){
 
 function renderSettings(){
   const d=disp();
-  const gdOk=!!getGDToken();const gdCid=!!localStorage.getItem('tf_gd_clientid');
+  const gdOk=!!getGDToken();const gdCid=!!localStorage.getItem('tf_gd_clientid');const lastSync=state.meta?.lastSync?new Date(state.meta.lastSync).toLocaleString('de-CH'):null;
 
   // helper: toggle row
   const trow=(key,label,sub)=>`
@@ -1036,7 +1047,7 @@ function renderSettings(){
 
     <div class="settings-section">
       <div class="settings-section-title">☁️ Google Drive Backup</div>
-      ${arow('Google Drive',gdOk?'✅ Verbunden — Sync aktiv':gdCid?'⚠️ Token abgelaufen — wird erneuert...':'Nicht verbunden',gdOk||gdCid?'Trennen':'Verbinden',gdOk||gdCid?'disconnectGD()':'showGDGuide()')}
+      ${arow('Google Drive',gdOk?'✅ Verbunden'+(lastSync?' · '+lastSync:''):gdCid?'⚠️ Token abgelaufen':'Nicht verbunden',gdOk||gdCid?'Trennen':'Verbinden',gdOk||gdCid?'disconnectGD()':'showGDGuide()')}
       ${gdOk?arow('Letzter Sync',state.meta.lastSync?new Date(state.meta.lastSync).toLocaleString('de-CH'):'Noch nie','Jetzt sync','syncNow()'):''}
     </div>
 
@@ -1110,42 +1121,14 @@ function importJSON(){
 }
 async function resetAll(){if(!confirm('Alle Daten unwiderruflich löschen?'))return;localStorage.clear();sessionStorage.clear();location.reload();}
 
-// ── GOOGLE DRIVE (GIS implicit flow — no client_secret needed) ──
-function showGDGuide(){
-  showModal({title:'☁️ Google Drive verbinden',body:`
-    <p style="color:var(--text-dim);font-size:13px;margin-bottom:4px">Einmalige Einrichtung — danach sync automatisch.</p>
-    <div class="guide-step"><div class="guide-step-num">1</div><div>
-      <div class="guide-step-title">Google Cloud Console öffnen</div>
-      <div class="guide-step-desc">Gehe zu <a href="https://console.cloud.google.com" target="_blank">console.cloud.google.com</a> und melde dich an.</div>
-    </div></div>
-    <div class="guide-step"><div class="guide-step-num">2</div><div>
-      <div class="guide-step-title">Neues Projekt erstellen</div>
-      <div class="guide-step-desc">Projekt-Dropdown oben links → <strong>Neues Projekt</strong> → Name: <code>TaskFlow</code> → Erstellen.</div>
-    </div></div>
-    <div class="guide-step"><div class="guide-step-num">3</div><div>
-      <div class="guide-step-title">Google Drive API aktivieren</div>
-      <div class="guide-step-desc"><strong>APIs &amp; Dienste → Bibliothek</strong> → suche <code>Google Drive API</code> → Aktivieren.</div>
-    </div></div>
-    <div class="guide-step"><div class="guide-step-num">4</div><div>
-      <div class="guide-step-title">OAuth Consent Screen</div>
-      <div class="guide-step-desc"><strong>Google Auth Platform → Branding</strong> → App-Name: <code>TaskFlow</code> → deine E-Mail → Speichern.<br>
-      Dann <strong>Audience → External → Add users</strong> → deine Gmail-Adresse eintragen.</div>
-    </div></div>
-    <div class="guide-step"><div class="guide-step-num">5</div><div>
-      <div class="guide-step-title">OAuth-Client-ID erstellen</div>
-      <div class="guide-step-desc"><strong>Clients → + Create Client</strong> → Typ: <strong>Web application</strong><br>
-      Authorized JavaScript origins: <code>${location.origin}</code><br>
-      Authorized redirect URIs: <code>${location.origin}${location.pathname}</code><br>
-      → Create.</div>
-    </div></div>
-    <div class="guide-step"><div class="guide-step-num">6</div><div>
-      <div class="guide-step-title">Client-ID kopieren &amp; einfügen</div>
-      <div class="guide-step-desc">Kopiere die Client-ID (endet auf <code>.apps.googleusercontent.com</code>) und klicke unten auf <strong>Verbinden</strong>.</div>
-    </div></div>
-    <div class="guide-note">💡 Kein Passwort oder Client-Secret nötig. Der Token wird nur für diese Browser-Session gespeichert.</div>`,
-    confirm:'Verbinden →',onConfirm:async()=>{connectGD();return true;}});
-}
+// ── GOOGLE DRIVE — Stable Sync (A+B+C) ──
 
+// Offline queue — stores changes made when token is expired
+let syncQueue = [];
+let syncInProgress = false;
+let tokenRefreshTimer = null;
+
+// ── TOKEN MANAGEMENT ──
 function gdAuthUrl(clientId, prompt){
   return 'https://accounts.google.com/o/oauth2/v2/auth?'+new URLSearchParams({
     client_id:clientId,
@@ -1158,239 +1141,343 @@ function gdAuthUrl(clientId, prompt){
   });
 }
 
-function connectGD(){
-  const clientId=prompt('Google OAuth Client-ID einfügen\n(endet auf .apps.googleusercontent.com):');
-  if(!clientId?.includes('.apps.googleusercontent.com')){toast('Ungültige Client-ID','error');return;}
-  localStorage.setItem('tf_gd_clientid',clientId);
-  location.href=gdAuthUrl(clientId,'select_account');
+function storeGDToken(token, expiresIn){
+  const expiresAt = Date.now() + (expiresIn * 1000) - 120000; // 2 min buffer
+  localStorage.setItem('tf_gd_token', token);
+  localStorage.setItem('tf_gd_expires', String(expiresAt));
+  // Schedule automatic refresh 5 min before expiry
+  scheduleTokenRefresh(expiresIn - 420); // refresh after (expiresIn - 7min) seconds
 }
 
-function reconnectGD(){
-  // Called when token expired — reuse saved client ID, open popup
-  const clientId=localStorage.getItem('tf_gd_clientid');
-  if(!clientId){toast('Bitte erst verbinden','error');return;}
-  const url=gdAuthUrl(clientId,'');
-  const popup=window.open(url,'gdauth','width=500,height=600,left=200,top=100');
-  if(!popup){
-    // Popup blocked — fallback to redirect
-    location.href=url;
+function getGDToken(){
+  const token   = localStorage.getItem('tf_gd_token');
+  const expires = parseInt(localStorage.getItem('tf_gd_expires') || '0');
+  if(!token || Date.now() > expires) return null;
+  return token;
+}
+
+function scheduleTokenRefresh(inSeconds){
+  clearTimeout(tokenRefreshTimer);
+  if(inSeconds <= 0) inSeconds = 30;
+  tokenRefreshTimer = setTimeout(()=>{
+    console.log('TaskFlow: scheduled token refresh');
+    silentTokenRefresh();
+  }, inSeconds * 1000);
+}
+
+function silentTokenRefresh(){
+  const clientId = localStorage.getItem('tf_gd_clientid');
+  if(!clientId) return;
+  const iframe = document.createElement('iframe');
+  iframe.style.display = 'none';
+  iframe.src = gdAuthUrl(clientId, 'none');
+  let done = false;
+  const cleanup = ()=>{ if(document.body.contains(iframe)) document.body.removeChild(iframe); };
+
+  iframe.onload = ()=>{
+    if(done) return;
+    try{
+      const h = new URLSearchParams(iframe.contentWindow.location.hash.replace('#',''));
+      const t = h.get('access_token');
+      if(t){
+        done = true;
+        storeGDToken(t, parseInt(h.get('expires_in')||'3600'));
+        setSyncStatus('ok', 'Verbunden', '');
+        cleanup();
+        // Flush queue if anything pending
+        flushQueue();
+      } else {
+        done = true;
+        setSyncStatus('error', 'Token abgelaufen', 'Klicke 🔑 zum Erneuern');
+        showReconnectHint();
+        cleanup();
+      }
+    } catch(e){
+      // Cross-origin = needs user interaction
+      if(!done){
+        done = true;
+        setSyncStatus('error', 'Token abgelaufen', 'Klicke 🔑 zum Erneuern');
+        showReconnectHint();
+        cleanup();
+      }
+    }
+  };
+
+  setTimeout(()=>{
+    if(!done){ done=true; cleanup(); silentTokenRefresh(); }
+  }, 8000);
+
+  document.body.appendChild(iframe);
+}
+
+// ── B: OFFLINE QUEUE ──
+function queueSync(){
+  syncQueue.push(Date.now());
+  updateQueueUI();
+  const token = getGDToken();
+  if(!token){
+    // Token expired — try silent refresh, queue will flush after
+    setSyncStatus('error','Token abgelaufen','Änderungen gespeichert, sync ausstehend');
+    showReconnectHint();
+    silentTokenRefresh();
     return;
   }
-  // Poll until popup closes or token appears in localStorage
-  const poll=setInterval(()=>{
+  debouncedSync();
+}
+
+function updateQueueUI(){
+  const q = document.getElementById('syncQueue');
+  const c = document.getElementById('syncQueueCount');
+  if(!q || !c) return;
+  if(syncQueue.length > 0){
+    q.style.display = 'block';
+    c.textContent = syncQueue.length;
+  } else {
+    q.style.display = 'none';
+  }
+}
+
+async function flushQueue(){
+  if(syncQueue.length === 0) return;
+  const token = getGDToken();
+  if(!token) return;
+  syncQueue = [];
+  updateQueueUI();
+  await syncNow();
+}
+
+// ── A: AUTO REFRESH POPUP ──
+function reconnectGD(){
+  const clientId = localStorage.getItem('tf_gd_clientid');
+  if(!clientId){ toast('Bitte erst verbinden','error'); return; }
+  const url = gdAuthUrl(clientId, '');
+  const popup = window.open(url,'gdauth','width=500,height=600,left=200,top=100');
+  if(!popup){ location.href = url; return; }
+
+  const poll = setInterval(()=>{
     try{
-      const h=new URLSearchParams(popup.location.hash.replace('#',''));
-      const t=h.get('access_token');
+      const h = new URLSearchParams(popup.location.hash.replace('#',''));
+      const t = h.get('access_token');
       if(t){
         storeGDToken(t, parseInt(h.get('expires_in')||'3600'));
         popup.close();
         clearInterval(poll);
-        toast('Google Drive verbunden ✓','success');
-        setSyncStatus('ok','Verbunden');
+        // Remove reconnect button
+        const rb = document.getElementById('reconnectBtn');
+        if(rb) rb.remove();
+        setSyncStatus('ok','Verbunden','Token erneuert ✓');
         renderSettings();
-        // Sync once after reconnect
-        setTimeout(syncNow,1000);
+        flushQueue();
       }
-    }catch(e){/* cross-origin while loading — ignore */}
+    } catch(e){ /* cross-origin while loading */ }
     if(popup.closed){
       clearInterval(poll);
-      // Check if token was stored via handleGDCallback
       if(getGDToken()){
-        toast('Google Drive verbunden ✓','success');
-        setSyncStatus('ok','Verbunden');
+        const rb = document.getElementById('reconnectBtn');
+        if(rb) rb.remove();
+        setSyncStatus('ok','Verbunden','');
         renderSettings();
-        setTimeout(syncNow,1000);
+        flushQueue();
       }
     }
-  },500);
+  }, 500);
 }
 
-function storeGDToken(token, expiresIn){
-  const expiresAt=Date.now()+(expiresIn*1000)-120000; // 2 min buffer
-  localStorage.setItem('tf_gd_token',token);
-  localStorage.setItem('tf_gd_expires',String(expiresAt));
+function connectGD(){
+  const clientId = prompt('Google OAuth Client-ID einfügen\n(endet auf .apps.googleusercontent.com):');
+  if(!clientId?.includes('.apps.googleusercontent.com')){ toast('Ungültige Client-ID','error'); return; }
+  localStorage.setItem('tf_gd_clientid', clientId);
+  location.href = gdAuthUrl(clientId, 'select_account');
 }
 
 function disconnectGD(){
+  clearTimeout(tokenRefreshTimer);
   localStorage.removeItem('tf_gd_token');
   localStorage.removeItem('tf_gd_expires');
   localStorage.removeItem('tf_gd_clientid');
-  toast('Google Drive getrennt');renderSettings();initSyncStatus();
+  syncQueue = [];
+  updateQueueUI();
+  toast('Google Drive getrennt');
+  renderSettings();
+  setSyncStatus('off', 'Nicht verbunden', '');
 }
 
 function handleGDCallback(){
-  const hash=new URLSearchParams(location.hash.replace('#',''));
-  if(hash.get('access_token')&&hash.get('state')==='gd_auth_implicit'){
+  const hash = new URLSearchParams(location.hash.replace('#',''));
+  if(hash.get('access_token') && hash.get('state')==='gd_auth_implicit'){
     storeGDToken(hash.get('access_token'), parseInt(hash.get('expires_in')||'3600'));
-    history.replaceState({},'',location.pathname);
+    history.replaceState({},'', location.pathname);
     toast('Google Drive verbunden ✓','success');
     return true;
   }
   return false;
 }
 
-function getGDToken(){
-  const token=localStorage.getItem('tf_gd_token');
-  const expires=parseInt(localStorage.getItem('tf_gd_expires')||'0');
-  if(!token||Date.now()>expires)return null;
-  return token;
-}
-
-function silentReconnectGD(){
-  const clientId=localStorage.getItem('tf_gd_clientid');
-  if(!clientId||getGDToken())return;
-  // Try silent iframe first
-  setSyncStatus('syncing','Verbinde...');
-  const iframe=document.createElement('iframe');
-  iframe.style.display='none';
-  iframe.src=gdAuthUrl(clientId,'none');
-  let done=false;
-  iframe.onload=()=>{
-    if(done)return;
-    try{
-      const h=new URLSearchParams(iframe.contentWindow.location.hash.replace('#',''));
-      const t=h.get('access_token');
-      if(t){
-        done=true;
-        storeGDToken(t, parseInt(h.get('expires_in')||'3600'));
-        setSyncStatus('ok','Verbunden');
-        // Only load from drive on silent reconnect, don't upload
-        loadFromDrive().then(refreshed=>{if(refreshed){renderSidebar();renderTasks();updateCounts();}});
-      } else {
-        // Silent failed — show reconnect button
-        setSyncStatus('error','Token abgelaufen');
-        showReconnectHint();
-      }
-    }catch(e){
-      // Cross-origin = needs user interaction
-      if(!done){done=true;setSyncStatus('error','Token abgelaufen');showReconnectHint();}
-    }
-    if(document.body.contains(iframe))document.body.removeChild(iframe);
-  };
-  setTimeout(()=>{
-    if(!done){done=true;setSyncStatus('error','Token abgelaufen');showReconnectHint();if(document.body.contains(iframe))document.body.removeChild(iframe);}
-  },5000);
-  document.body.appendChild(iframe);
+// ── C: SYNC STATUS UI ──
+function setSyncStatus(s, label, sub=''){
+  const dot = document.getElementById('syncDot');
+  const lbl = document.getElementById('syncLabel');
+  const slbl= document.getElementById('syncSub');
+  const btn = document.getElementById('syncBtn');
+  if(dot){ dot.className='sync-dot '+(s==='off'?'':s); }
+  if(lbl) lbl.textContent = label;
+  if(slbl) slbl.textContent = sub;
+  if(btn){ btn.classList.toggle('spinning', s==='syncing'); }
+  if(s==='ok'){ const rb=document.getElementById('reconnectBtn');if(rb)rb.remove(); }
 }
 
 function showReconnectHint(){
-  // Show reconnect button in sync status bar
-  document.getElementById('syncLabel').innerHTML='Token abgelaufen';
-  const btn=document.getElementById('reconnectBtn');
-  if(!btn){
-    const b=document.createElement('button');
-    b.id='reconnectBtn';b.className='icon-btn';
-    b.title='Neu verbinden';b.textContent='🔑';
-    b.style.cssText='margin-left:4px;color:var(--amber)';
-    b.onclick=reconnectGD;
-    document.querySelector('.sync-status').appendChild(b);
+  if(document.getElementById('reconnectBtn')) return;
+  const b = document.createElement('button');
+  b.id='reconnectBtn'; b.className='icon-btn';
+  b.title='Token erneuern'; b.textContent='🔑';
+  b.style.cssText='color:var(--amber);flex-shrink:0';
+  b.onclick = reconnectGD;
+  const ss = document.querySelector('.sync-status');
+  if(ss) ss.appendChild(b);
+}
+
+function initSyncStatus(){
+  const token = getGDToken();
+  const cid   = localStorage.getItem('tf_gd_clientid');
+  if(token){
+    setSyncStatus('ok','Verbunden','');
+    // Schedule refresh based on remaining time
+    const expires = parseInt(localStorage.getItem('tf_gd_expires')||'0');
+    const remaining = Math.max(0, Math.floor((expires - Date.now()) / 1000));
+    scheduleTokenRefresh(remaining - 300); // 5 min before expiry
+  } else if(cid){
+    setSyncStatus('error','Token abgelaufen','Wird erneuert...');
+    silentTokenRefresh();
+  } else {
+    setSyncStatus('off','Nicht verbunden','');
   }
 }
+
+// ── DRIVE API HELPERS ──
 async function gdFindFile(token){
-  const fn='taskflow-data.json';
-  const r=await fetch(`https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=name='${fn}'&fields=files(id,modifiedTime)`,{headers:{Authorization:'Bearer '+token}});
-  const d=await r.json();
-  return d.files?.[0]||null;
+  const r = await fetch(
+    "https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=name='taskflow-data.json'&fields=files(id,modifiedTime)",
+    {headers:{Authorization:'Bearer '+token}}
+  );
+  const d = await r.json();
+  return d.files?.[0] || null;
 }
-async function gdUpload(token,fileId,body){
+
+async function gdUpload(token, fileId, body){
   if(fileId){
-    await fetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`,{method:'PATCH',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body});
-  }else{
-    const m=await(await fetch('https://www.googleapis.com/drive/v3/files',{method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify({name:'taskflow-data.json',parents:['appDataFolder']})})).json();
-    await fetch(`https://www.googleapis.com/upload/drive/v3/files/${m.id}?uploadType=media`,{method:'PATCH',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body});
-    return m.id;
+    await fetch(
+      `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`,
+      {method:'PATCH', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body}
+    );
+  } else {
+    const m = await (await fetch(
+      'https://www.googleapis.com/drive/v3/files',
+      {method:'POST', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
+       body:JSON.stringify({name:'taskflow-data.json',parents:['appDataFolder']})}
+    )).json();
+    await fetch(
+      `https://www.googleapis.com/upload/drive/v3/files/${m.id}?uploadType=media`,
+      {method:'PATCH', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body}
+    );
   }
-  return fileId;
 }
-async function gdDownload(token,fileId){
-  const r=await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,{headers:{Authorization:'Bearer '+token}});
+
+async function gdDownload(token, fileId){
+  const r = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
+    {headers:{Authorization:'Bearer '+token}}
+  );
   return await r.json();
 }
 
-async function loadFromDrive(){
-  const token=getGDToken();
-  if(!token)return false;
+// ── MAIN SYNC ──
+async function syncNow(){
+  if(syncInProgress) return;
+  const token = getGDToken();
+  if(!token){
+    queueSync();
+    return;
+  }
+  syncInProgress = true;
+  setSyncStatus('syncing','Synchronisiert...','');
+  document.getElementById('syncBtn')?.classList.add('spinning');
+
   try{
-    setSyncStatus('syncing','Lade von Drive...');
-    const file=await gdFindFile(token);
-    if(!file)return false; // nothing on drive yet
-    const remote=await gdDownload(token,file.id);
-    if(!remote||!remote.tasks)return false;
-    // Merge: use whichever was synced more recently
-    const localSync=state.meta?.lastSync?new Date(state.meta.lastSync).getTime():0;
-    const remoteSync=remote.meta?.lastSync?new Date(remote.meta.lastSync).getTime():0;
-    if(remoteSync>localSync){
-      // Remote is newer — load it
-      state=remote;
-      if(!state.settings.display)state.settings.display={notes:true,priority:true,dueDate:true,recur:true,subtasks:true,listDot:true};
-      ['notes','priority','dueDate','recur','subtasks','listDot'].forEach(k=>{if(state.settings.display[k]===undefined)state.settings.display[k]=true;});
+    const file = await gdFindFile(token);
+    if(file){
+      const remote = await gdDownload(token, file.id);
+      const localSync  = state.meta?.lastSync  ? new Date(state.meta.lastSync).getTime()  : 0;
+      const remoteSync = remote.meta?.lastSync ? new Date(remote.meta.lastSync).getTime() : 0;
+
+      if(remoteSync > localSync){
+        // Remote newer — load it
+        state = remote;
+        if(!state.settings.display) state.settings.display={notes:true,priority:true,dueDate:true,recur:true,subtasks:true,listDot:true};
+        await saveData(false);
+        renderSidebar(); renderTasks(); updateCounts();
+        toast('Daten von Drive geladen ✓','success');
+      } else {
+        // Local newer — upload
+        state.meta.lastSync = new Date().toISOString();
+        await gdUpload(token, file.id, JSON.stringify(state));
+        await saveData(false);
+      }
+    } else {
+      // First upload
+      state.meta.lastSync = new Date().toISOString();
+      await gdUpload(token, null, JSON.stringify(state));
       await saveData(false);
-      setSyncStatus('ok','Synchronisiert');
-      return true;
-    }else{
-      // Local is newer — upload it
-      await gdUpload(token,file.id,JSON.stringify(state));
-      state.meta.lastSync=new Date().toISOString();
-      await saveData(false);
-      setSyncStatus('ok','Synchronisiert');
-      return false; // no UI refresh needed
     }
-  }catch(e){
-    console.error('loadFromDrive error',e);
-    setSyncStatus('error','Drive-Fehler');
+
+    syncQueue = [];
+    updateQueueUI();
+    const t = new Date().toLocaleTimeString('de-CH',{hour:'2-digit',minute:'2-digit'});
+    setSyncStatus('ok','Verbunden',`Zuletzt: ${t}`);
+    if(document.getElementById('settingsPanel')?.style.display!=='none') renderSettings();
+  } catch(e){
+    console.error('Sync error:', e);
+    setSyncStatus('error','Sync fehlgeschlagen','Erneut versuchen mit 🔄');
+    toast('Sync fehlgeschlagen','error');
+  } finally {
+    syncInProgress = false;
+    document.getElementById('syncBtn')?.classList.remove('spinning');
+  }
+}
+
+async function loadFromDrive(){
+  const token = getGDToken();
+  if(!token) return false;
+  try{
+    setSyncStatus('syncing','Lade von Drive...','');
+    const file = await gdFindFile(token);
+    if(!file) return false;
+    const remote = await gdDownload(token, file.id);
+    if(!remote?.tasks) return false;
+    const localSync  = state.meta?.lastSync  ? new Date(state.meta.lastSync).getTime()  : 0;
+    const remoteSync = remote.meta?.lastSync ? new Date(remote.meta.lastSync).getTime() : 0;
+    if(remoteSync > localSync){
+      state = remote;
+      if(!state.settings.display) state.settings.display={notes:true,priority:true,dueDate:true,recur:true,subtasks:true,listDot:true};
+      await saveData(false);
+      setSyncStatus('ok','Verbunden','Drive geladen ✓');
+      return true;
+    } else {
+      await gdUpload(token, file.id, JSON.stringify(state));
+      state.meta.lastSync = new Date().toISOString();
+      await saveData(false);
+      setSyncStatus('ok','Verbunden','');
+      return false;
+    }
+  } catch(e){
+    setSyncStatus('error','Drive-Fehler','');
     return false;
   }
 }
 
-async function syncNow(){
-  const token=getGDToken();
-  if(!token){const cid=localStorage.getItem('tf_gd_clientid');if(cid){showReconnectHint();setSyncStatus('error','Token abgelaufen');}else{toast('Google Drive nicht verbunden','error');}return;}
-  setSyncStatus('syncing','Synchronisiert...');
-  try{
-    const file=await gdFindFile(token);
-    if(file){
-      // Check if remote is newer first
-      const remote=await gdDownload(token,file.id);
-      const localSync=state.meta?.lastSync?new Date(state.meta.lastSync).getTime():0;
-      const remoteSync=remote.meta?.lastSync?new Date(remote.meta.lastSync).getTime():0;
-      if(remoteSync>localSync){
-        state=remote;
-        if(!state.settings.display)state.settings.display={notes:true,priority:true,dueDate:true,recur:true,subtasks:true,listDot:true};
-        await saveData(false);
-        renderSidebar();renderTasks();updateCounts();
-        toast('Daten von Drive geladen ✓','success');
-      } else {
-        state.meta.lastSync=new Date().toISOString();
-        await gdUpload(token,file.id,JSON.stringify(state));
-        await saveData(false); // don't re-trigger sync
-        toast('Sync ✓','success');
-      }
-    } else {
-      // First time — upload
-      state.meta.lastSync=new Date().toISOString();
-      await gdUpload(token,null,JSON.stringify(state));
-      await saveData(false);
-      toast('Sync ✓','success');
-    }
-    setSyncStatus('ok','Synchronisiert');
-    if(document.getElementById('settingsPanel').style.display!=='none')renderSettings();
-  }catch(e){setSyncStatus('error','Sync-Fehler');toast('Sync fehlgeschlagen','error');}
-}
 function debouncedSync(){
-  // Option C: trigger sync 4 seconds after last change
-  clearTimeout(syncTimer);
-  syncTimer=setTimeout(async()=>{
-    if(getGDToken()){
-      await syncNow();
-    }
-  },4000);
-}
-function initSyncStatus(){const t=getGDToken();const cid=localStorage.getItem('tf_gd_clientid');if(t){setSyncStatus('ok','Verbunden');}else if(cid){setSyncStatus('syncing','Wird verbunden...');silentReconnectGD();}else{setSyncStatus('error','Nicht verbunden');}}
-function setSyncStatus(s,lbl){
-  document.getElementById('syncDot').className='sync-dot '+s;
-  document.getElementById('syncLabel').textContent=lbl;
-  // Remove reconnect button if status is ok
-  if(s==='ok'){const b=document.getElementById('reconnectBtn');if(b)b.remove();}
+  clearTimeout(window._syncTimer);
+  window._syncTimer = setTimeout(()=>{ if(getGDToken()) syncNow(); }, 4000);
 }
 
 // ── SIDEBAR MOBILE ──
